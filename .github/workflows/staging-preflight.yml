@@ -1,0 +1,29 @@
+name: Identity Metric Staging Preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact commit SHA or immutable Git ref to test
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    environment: staging-e2e
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Run JWKS, account token, ingest, and linked deletion flow
+        env:
+          IDENTITY_URL: ${{ vars.IDENTITY_URL }}
+          METRIC_URL: ${{ vars.METRIC_URL }}
+          PRODUCT_WORKLOAD_TOKEN: ${{ secrets.PRODUCT_WORKLOAD_TOKEN }}
+          EMAIL_VERIFIER_TOKEN: ${{ secrets.EMAIL_VERIFIER_TOKEN }}
+          PRIVACY_ADMIN_TOKEN: ${{ secrets.PRIVACY_ADMIN_TOKEN }}
+          PREFLIGHT_EMAIL: ${{ secrets.PREFLIGHT_EMAIL }}
+        run: sh ./staging-preflight.sh

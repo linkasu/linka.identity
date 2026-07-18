@@ -1,0 +1,103 @@
+name: Deploy Identity YC
+
+on:
+  workflow_run:
+    workflows: [Publish Identity Image]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact commit SHA or immutable Git ref
+        required: true
+      image_tag:
+        description: Immutable sha-<commit> image tag
+        required: true
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    environment: production-yc
+    env:
+      DEPLOY_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.event.workflow_run.head_sha }}
+      IMAGE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || format('sha-{0}', github.event.workflow_run.head_sha) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_REF }}
+      - name: Validate immutable inputs
+        run: |
+          [[ "$IMAGE_TAG" =~ ^sha-[0-9a-f]{40}$ ]]
+          if [[ "$DEPLOY_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            test "$IMAGE_TAG" = "sha-$DEPLOY_REF"
+          fi
+          test -n "${{ vars.IDENTITY_PUBLIC_URL }}"
+          test -n "${{ vars.EMAIL_KEY_ACTIVE_ID }}"
+          test -n "${{ vars.GATEWAY_RATE_LIMIT_POLICY_ID }}"
+      - name: Install YC CLI
+        run: curl -fsSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -a
+      - name: Configure service account
+        env:
+          YC_SA_KEY_JSON: ${{ secrets.YC_SA_KEY_JSON }}
+          YC_CLOUD_ID: ${{ secrets.YC_CLOUD_ID }}
+          YC_FOLDER_ID: ${{ secrets.YC_FOLDER_ID }}
+        run: |
+          install -m 600 /dev/null /tmp/yc-key.json
+          printf '%s' "$YC_SA_KEY_JSON" > /tmp/yc-key.json
+          "$HOME/yandex-cloud/bin/yc" config set service-account-key /tmp/yc-key.json
+          "$HOME/yandex-cloud/bin/yc" config set cloud-id "$YC_CLOUD_ID"
+          "$HOME/yandex-cloud/bin/yc" config set folder-id "$YC_FOLDER_ID"
+      - name: Mirror immutable image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          YC_SA_KEY_JSON: ${{ secrets.YC_SA_KEY_JSON }}
+          YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+          printf '%s' "$YC_SA_KEY_JSON" | docker login cr.yandex --username json_key --password-stdin
+          docker buildx imagetools create \
+            --tag "cr.yandex/$YC_REGISTRY_ID/linka-identity:$IMAGE_TAG" \
+            "ghcr.io/linkasu/linka.identity:$IMAGE_TAG"
+      - name: Run immutable migration image
+        env:
+          YC_LOCKBOX_SECRET_ID: ${{ secrets.YC_LOCKBOX_SECRET_ID }}
+          YC_LOCKBOX_SECRET_VERSION_ID: ${{ secrets.YC_LOCKBOX_SECRET_VERSION_ID }}
+          YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+        run: |
+          database_url="$("$HOME/yandex-cloud/bin/yc" lockbox payload get --id "$YC_LOCKBOX_SECRET_ID" --version-id "$YC_LOCKBOX_SECRET_VERSION_ID" --format json | jq -er '.entries[] | select(.key == "database_url") | .textValue')"
+          printf '::add-mask::%s\n' "$database_url"
+          DATABASE_URL="$database_url" docker run --rm --entrypoint /usr/local/bin/migrate \
+            -e DATABASE_URL "cr.yandex/$YC_REGISTRY_ID/linka-identity:$IMAGE_TAG"
+      - name: Deploy immutable revision with Lockbox references
+        env:
+          YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+          YC_RUNTIME_SA_ID: ${{ secrets.YC_RUNTIME_SA_ID }}
+          YC_LOCKBOX_SECRET_ID: ${{ secrets.YC_LOCKBOX_SECRET_ID }}
+          YC_LOCKBOX_SECRET_VERSION_ID: ${{ secrets.YC_LOCKBOX_SECRET_VERSION_ID }}
+        run: |
+          trap 'rm -f /tmp/yc-key.json' EXIT
+          "$HOME/yandex-cloud/bin/yc" serverless container revision deploy \
+            --container-name linka-identity \
+            --image "cr.yandex/$YC_REGISTRY_ID/linka-identity:$IMAGE_TAG" \
+            --cores 1 --memory 512M --execution-timeout 30s --concurrency 16 \
+            --service-account-id "$YC_RUNTIME_SA_ID" \
+            --environment "HTTP_ADDR=:8080,DEPLOYMENT_ENVIRONMENT=production,EMAIL_KEY_PROVIDER=yandex-kms,EMAIL_KEY_ACTIVE_ID=${{ vars.EMAIL_KEY_ACTIVE_ID }},BLIND_INDEX_CURRENT_VERSION=${{ vars.BLIND_INDEX_CURRENT_VERSION }},TOKEN_ACTIVE_KEY_ID=${{ vars.TOKEN_ACTIVE_KEY_ID }},TOKEN_ISSUER=${{ vars.TOKEN_ISSUER }},REQUIRE_OUTBOX_DELIVERY=true,OUTBOX_DELIVERY_URL=${{ vars.METRIC_PRIVACY_URL }}" \
+            --secret "environment-variable=DATABASE_URL,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=database_url" \
+            --secret "environment-variable=WORKLOADS_JSON,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=workloads_json" \
+            --secret "environment-variable=PRODUCTS_JSON,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=products_json" \
+            --secret "environment-variable=PAIRWISE_ID_KEY_BASE64,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=pairwise_id_key_base64" \
+            --secret "environment-variable=EMAIL_YC_KMS_KEYS_JSON,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=email_yc_kms_keys_json" \
+            --secret "environment-variable=BLIND_INDEX_KEYS_JSON,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=blind_index_keys_json" \
+            --secret "environment-variable=TOKEN_SIGNING_KEYS_JSON,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=token_signing_keys_json"
+      - name: Production readiness and JWKS smoke
+        env:
+          IDENTITY_PUBLIC_URL: ${{ vars.IDENTITY_PUBLIC_URL }}
+        run: |
+          curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 5 "$IDENTITY_PUBLIC_URL/readyz" | jq -e '.status == "ready"'
+          curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 "$IDENTITY_PUBLIC_URL/.well-known/jwks.json" | jq -e '.keys | length >= 1'

@@ -1,0 +1,784 @@
+openapi: 3.1.0
+info:
+  title: LINKa Identity API
+  version: 0.1.0
+  description: >-
+    Internal API for optional accounts, anonymous installations, encrypted email
+    identities, organizations, consent, telemetry preference, privacy requests,
+    and product-scoped tokens. Workload credentials are role- and product-scoped.
+    Raw email and root UUIDs never appear in a response or token.
+servers:
+  - url: http://localhost:8080
+security:
+  - internalBearer: []
+paths:
+  /healthz:
+    get:
+      operationId: health
+      summary: Report process liveness
+      security: []
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+  /readyz:
+    get:
+      operationId: readiness
+      summary: Report PostgreSQL and schema readiness
+      security: []
+      responses:
+        "200":
+          description: PostgreSQL is reachable and the current migration is applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /.well-known/jwks.json:
+    get:
+      operationId: getJWKS
+      summary: Return active and retiring token verification keys
+      security: []
+      responses:
+        "200":
+          description: Active Ed25519 verification key
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties:
+                        type: string
+  /v1/installations:
+    post:
+      operationId: createInstallation
+      summary: Create an anonymous product installation and return only its pairwise key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstallationRequest"
+      responses:
+        "201":
+          description: Installation created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Installation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/email-identities:
+    post:
+      operationId: registerEmailIdentity
+      summary: Consume a verified email challenge and create or resolve an identity
+      description: >-
+        Product scope is the default. Donation namespace is always product-local.
+        Global minor linkage fails unless the deployment feature flag is enabled;
+        unknown age can never request global linkage.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailIdentityRequest"
+      responses:
+        "200":
+          description: Existing identity resolved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailIdentityResponse"
+        "201":
+          description: Identity created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailIdentityResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /v1/email-verifications:
+    post:
+      operationId: beginEmailVerification
+      summary: Encrypt email and create a short-lived pending ownership challenge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailVerificationRequest"
+      responses:
+        "202":
+          description: Verification challenge created; no email is returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailVerificationResponse"
+  /v1/internal/email-verifications/{id}/verify:
+    post:
+      operationId: verifyEmailOwnership
+      summary: Record external ownership evidence as an email_verifier workload
+      parameters:
+        - $ref: "#/components/parameters/UUIDPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [product_id, evidence_id]
+              properties:
+                product_id:
+                  $ref: "#/components/schemas/ProductID"
+                evidence_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+      responses:
+        "200":
+          description: Ownership evidence recorded
+  /v1/tokens:
+    post:
+      operationId: issueToken
+      summary: Issue a short-lived product-scoped JWT with no email or root UUID
+      description: Account JWTs contain the account subject key and a separate pairwise person_key for privacy aggregation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenRequest"
+      responses:
+        "201":
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/organization-submissions:
+    post:
+      operationId: createOrganizationSubmission
+      summary: Submit a free-text organization name for review
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrganizationSubmissionRequest"
+      responses:
+        "201":
+          description: Submission created with pending status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/internal/organizations:
+    post:
+      operationId: createCanonicalOrganization
+      summary: Create a canonical organization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [canonical_name]
+              properties:
+                canonical_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 240
+      responses:
+        "201":
+          description: Canonical organization created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedStatus"
+  /v1/internal/organization-submissions/{id}/resolve:
+    post:
+      operationId: resolveOrganizationSubmission
+      summary: Match or reject a pending organization submission
+      parameters:
+        - $ref: "#/components/parameters/UUIDPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrganizationResolutionRequest"
+      responses:
+        "200":
+          description: Submission resolved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/internal/organizations/{id}/merge:
+    post:
+      operationId: mergeCanonicalOrganization
+      summary: Audit and merge a canonical organization into another
+      parameters:
+        - $ref: "#/components/parameters/UUIDPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrganizationMergeRequest"
+      responses:
+        "200":
+          description: Organization merged
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, status, merged_into_id]
+                properties:
+                  id:
+                    $ref: "#/components/schemas/UUID"
+                  status:
+                    const: merged
+                  merged_into_id:
+                    $ref: "#/components/schemas/UUID"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/memberships:
+    post:
+      operationId: createMembership
+      summary: Create or update a person's canonical organization membership
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MembershipRequest"
+      responses:
+        "201":
+          description: Membership recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/consents:
+    post:
+      operationId: createConsent
+      summary: Append an explicit versioned consent status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConsentRequest"
+      responses:
+        "201":
+          description: Consent evidence recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, recorded_at]
+                properties:
+                  id:
+                    $ref: "#/components/schemas/UUID"
+                  recorded_at:
+                    type: string
+                    format: date-time
+  /v1/telemetry-preferences:
+    put:
+      operationId: setTelemetryPreference
+      summary: Record explicit telemetry preference
+      description: Client recorded_at is bounded and retained only as audit time. A transition to denied emits a suppression event with server time.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TelemetryPreferenceRequest"
+      responses:
+        "200":
+          description: Preference stored
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [preference, recorded_at]
+                properties:
+                  preference:
+                    type: string
+                    enum: [allowed, denied]
+                  recorded_at:
+                    type: string
+                    format: date-time
+  /v1/privacy-requests:
+    post:
+      operationId: createPrivacyRequest
+      summary: Request deletion
+      description: Anonymous installations can request product scope only.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrivacyRequest"
+      responses:
+        "202":
+          description: Request accepted for processing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedStatus"
+  /v1/internal/privacy-requests:
+    post:
+      operationId: createGlobalPrivacyRequest
+      summary: Create an all-products request as a privacy_global workload
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrivacyRequest"
+      responses:
+        "202":
+          description: Global request accepted for durable orchestration
+  /v1/privacy-requests/{id}:
+    get:
+      operationId: getPrivacyRequest
+      summary: Read privacy-request status
+      parameters:
+        - $ref: "#/components/parameters/UUIDPath"
+      responses:
+        "200":
+          description: Current request status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrivacyRequestStatus"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /v1/internal/privacy-requests/{id}/status:
+    post:
+      operationId: updatePrivacyRequestStatus
+      summary: Apply an audited privacy-request state transition
+      parameters:
+        - $ref: "#/components/parameters/UUIDPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PrivacyStatusUpdate"
+      responses:
+        "200":
+          description: State transition applied
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatedStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+components:
+  securitySchemes:
+    internalBearer:
+      type: http
+      scheme: bearer
+      description: Per-workload credential. Server-side roles and product scopes authorize each route.
+  parameters:
+    UUIDPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+  responses:
+    BadRequest:
+      description: Request failed strict validation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Internal bearer credential is missing or invalid
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Linkage policy forbids the operation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource was not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: Existing resource conflicts with the supplied data
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unavailable:
+      description: Required dependency is unavailable
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Status"
+  schemas:
+    UUID:
+      type: string
+      format: uuid
+    ProductID:
+      type: string
+      pattern: "^[a-z][a-z0-9_-]{1,63}$"
+    OpaqueKey:
+      type: string
+      pattern: "^[a-f0-9]{64}$"
+    Status:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    CreatedStatus:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          $ref: "#/components/schemas/UUID"
+        status:
+          type: string
+    SubjectFields:
+      type: object
+      required: [subject_type, subject_key]
+      properties:
+        subject_type:
+          type: string
+          enum: [person, account, installation]
+        subject_key:
+          $ref: "#/components/schemas/OpaqueKey"
+    InstallationRequest:
+      type: object
+      additionalProperties: false
+      required: [platform]
+      properties:
+        product_id:
+          $ref: "#/components/schemas/ProductID"
+        platform:
+          type: string
+          minLength: 1
+          maxLength: 64
+    Installation:
+      type: object
+      required: [installation_key, product, platform, created_at]
+      properties:
+        installation_key:
+          $ref: "#/components/schemas/OpaqueKey"
+        product:
+          $ref: "#/components/schemas/ProductID"
+        platform:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    EmailVerificationRequest:
+      type: object
+      additionalProperties: false
+      required: [email, identity_namespace, age_category]
+      properties:
+        product_id:
+          $ref: "#/components/schemas/ProductID"
+        email:
+          type: string
+          format: email
+          maxLength: 320
+          writeOnly: true
+        identity_namespace:
+          type: string
+          enum: [account, donation]
+        age_category:
+          type: string
+          enum: [unknown, adult, minor]
+        guardian_relationship:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: Optional free text for a minor; it is not proof of authority or consent.
+        link_across_products:
+          type: boolean
+          default: false
+        installation_key:
+          $ref: "#/components/schemas/OpaqueKey"
+    EmailVerificationResponse:
+      type: object
+      additionalProperties: false
+      required: [verification_id, status, expires_at]
+      properties:
+        verification_id:
+          $ref: "#/components/schemas/UUID"
+        status:
+          const: pending
+        expires_at:
+          type: string
+          format: date-time
+    EmailIdentityRequest:
+      type: object
+      additionalProperties: false
+      required: [verification_id]
+      properties:
+        product_id:
+          $ref: "#/components/schemas/ProductID"
+        verification_id:
+          $ref: "#/components/schemas/UUID"
+        create_account:
+          type: boolean
+          default: false
+    EmailIdentityResponse:
+      type: object
+      additionalProperties: false
+      required: [subject_type, subject_key]
+      properties:
+        subject_type:
+          type: string
+          enum: [person, account]
+        subject_key:
+          $ref: "#/components/schemas/OpaqueKey"
+    TokenRequest:
+      type: object
+      additionalProperties: false
+      required: [subject_type, subject_key]
+      properties:
+        product_id:
+          $ref: "#/components/schemas/ProductID"
+        subject_type:
+          type: string
+          enum: [account, installation]
+        subject_key:
+          $ref: "#/components/schemas/OpaqueKey"
+        ttl_seconds:
+          type: integer
+          minimum: 0
+          description: Zero or omission uses configured short default; configured maximum always applies.
+    TokenResponse:
+      type: object
+      required: [access_token, token_type, expires_at]
+      properties:
+        access_token:
+          type: string
+        token_type:
+          const: Bearer
+        expires_at:
+          type: string
+          format: date-time
+    OrganizationSubmissionRequest:
+      allOf:
+        - $ref: "#/components/schemas/SubjectFields"
+        - type: object
+          required: [product_id, submitted_name]
+          properties:
+            product_id:
+              $ref: "#/components/schemas/ProductID"
+            submitted_name:
+              type: string
+              minLength: 1
+              maxLength: 240
+      unevaluatedProperties: false
+    OrganizationResolutionRequest:
+      type: object
+      additionalProperties: false
+      required: [status, audit_note]
+      properties:
+        status:
+          type: string
+          enum: [matched, rejected]
+        organization_id:
+          $ref: "#/components/schemas/UUID"
+        audit_note:
+          type: string
+          minLength: 1
+          maxLength: 1000
+    OrganizationMergeRequest:
+      type: object
+      additionalProperties: false
+      required: [target_organization_id, reason]
+      properties:
+        target_organization_id:
+          $ref: "#/components/schemas/UUID"
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1000
+    MembershipRequest:
+      type: object
+      additionalProperties: false
+      required: [person_key, organization_id, product_id, status]
+      properties:
+        person_key:
+          $ref: "#/components/schemas/OpaqueKey"
+        organization_id:
+          $ref: "#/components/schemas/UUID"
+        product_id:
+          $ref: "#/components/schemas/ProductID"
+        role_label:
+          type: string
+          minLength: 1
+          maxLength: 120
+        status:
+          type: string
+          enum: [active, inactive, pending]
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+    ConsentRequest:
+      allOf:
+        - $ref: "#/components/schemas/SubjectFields"
+        - type: object
+          required: [product_id, consent_type, policy_version, status, recorded_at]
+          properties:
+            product_id:
+              $ref: "#/components/schemas/ProductID"
+            consent_type:
+              type: string
+              minLength: 1
+              maxLength: 100
+            policy_version:
+              type: string
+              minLength: 1
+              maxLength: 100
+            status:
+              type: string
+              enum: [granted, withdrawn]
+            recorded_at:
+              type: string
+              format: date-time
+      unevaluatedProperties: false
+    TelemetryPreferenceRequest:
+      allOf:
+        - $ref: "#/components/schemas/SubjectFields"
+        - type: object
+          required: [product_id, preference, recorded_at]
+          properties:
+            product_id:
+              $ref: "#/components/schemas/ProductID"
+            preference:
+              type: string
+              enum: [allowed, denied]
+            recorded_at:
+              type: string
+              format: date-time
+      unevaluatedProperties: false
+    PrivacyRequest:
+      allOf:
+        - $ref: "#/components/schemas/SubjectFields"
+        - type: object
+          required: [request_type, scope]
+          properties:
+            request_type:
+              type: string
+              const: deletion
+            scope:
+              type: string
+              enum: [product, all]
+            product_id:
+              $ref: "#/components/schemas/ProductID"
+            anchor_product_id:
+              $ref: "#/components/schemas/ProductID"
+      unevaluatedProperties: false
+    PrivacyRequestStatus:
+      type: object
+      required: [id, request_type, scope, status, requested_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/UUID"
+        request_type:
+          type: string
+          enum: [export, deletion]
+        scope:
+          type: string
+          enum: [product, all]
+        product_id:
+          $ref: "#/components/schemas/ProductID"
+        status:
+          type: string
+          enum: [requested, processing, completed, rejected, cancelled]
+        requested_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+    PrivacyStatusUpdate:
+      type: object
+      additionalProperties: false
+      required: [status, audit_note]
+      properties:
+        status:
+          type: string
+          enum: [processing, rejected, cancelled]
+        audit_note:
+          type: string
+          minLength: 1
+          maxLength: 1000

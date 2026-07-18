@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.5-bookworm
+        env:
+          POSTGRES_DB: identity_test
+          POSTGRES_USER: identity_test
+          POSTGRES_PASSWORD: identity-ci-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U identity_test -d identity_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://identity_test:identity-ci-test-only@127.0.0.1:5432/identity_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -race ./...
+      - run: go test -tags=integration ./...
+      - run: go vet ./...
+      - run: go build ./...
+      - run: sh -n staging-preflight.sh
