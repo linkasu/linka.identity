@@ -34,6 +34,9 @@ jobs:
           cache: true
       - name: Wait for official local YDB
         run: |
+          ydb_host="$(docker ps --filter ancestor=cr.yandex/yc/yandex-docker-local-ydb@sha256:5ffb7860784d5517f60b6cf9fdf641b964395ed642d818e2b3d892259e155af9 --format '{{.ID}}')"
+          test -n "$ydb_host"
+          printf '127.0.0.1 %s\n' "$ydb_host" | sudo tee -a /etc/hosts >/dev/null
           for attempt in $(seq 1 60); do
             curl --fail --silent http://127.0.0.1:8765/ >/dev/null && exit 0
             sleep 2
