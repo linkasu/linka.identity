@@ -108,12 +108,14 @@ jobs:
           container_url="$("$HOME/yandex-cloud/bin/yc" serverless container get \
             --name linka-identity --format json | jq -er .url)"
           iam_token="$("$HOME/yandex-cloud/bin/yc" iam create-token)"
-          for attempt in $(seq 1 8); do
-            curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 \
+          for attempt in $(seq 1 12); do
+            if tick_response="$(curl --fail --silent --show-error \
               --request POST "$container_url/internal/workers/tick" \
-              --header "Authorization: Bearer $iam_token" | jq -e '.status == "ok"'
-            if curl --silent --show-error "${{ vars.IDENTITY_PUBLIC_URL }}/readyz" | jq -e '.status == "ready"'; then
-              exit 0
+              --header "Authorization: Bearer $iam_token")"; then
+              if printf '%s' "$tick_response" | jq -e '.status == "ok"' >/dev/null && \
+                curl --silent --show-error "${{ vars.IDENTITY_PUBLIC_URL }}/readyz" | jq -e '.status == "ready"'; then
+                exit 0
+              fi
             fi
             sleep 10
           done

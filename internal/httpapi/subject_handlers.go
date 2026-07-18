@@ -137,7 +137,7 @@ func (s *Server) createPrivacyRequest(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, domain.ErrForbidden)
 		return
 	}
-	requestedAt := time.Now().UTC()
+	requestedAt := time.Now().UTC().Truncate(time.Millisecond)
 	request := store.PrivacyRequest{
 		Subject: rootSubject(resolved), SubjectKey: input.SubjectKey, RequestType: input.RequestType, Scope: input.Scope,
 		ProductID: productID, RequestedAt: requestedAt, RequestedByWorkload: workload.ID, IdempotencyKey: idempotencyKey,
