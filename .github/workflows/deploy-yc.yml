@@ -39,7 +39,7 @@ jobs:
           fi
           test -n "${{ vars.IDENTITY_PUBLIC_URL }}"
           test -n "${{ vars.EMAIL_KEY_ACTIVE_ID }}"
-          test -n "${{ vars.GATEWAY_RATE_LIMIT_POLICY_ID }}"
+          test -n "${{ vars.IDENTITY_GATEWAY_ID }}"
           test -n "${{ vars.YDB_ENDPOINT }}"
           test -n "${{ vars.YDB_DATABASE }}"
       - name: Install YC CLI

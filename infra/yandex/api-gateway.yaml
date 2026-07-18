@@ -1,0 +1,23 @@
+openapi: 3.0.0
+info:
+  title: linka-identity
+  version: 1.0.0
+paths:
+  /:
+    x-yc-apigateway-any-method:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+  /{proxy+}:
+    parameters:
+      - name: proxy
+        in: path
+        required: true
+        schema:
+          type: string
+    x-yc-apigateway-any-method:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
