@@ -107,6 +107,7 @@ jobs:
         run: |
           container_url="$("$HOME/yandex-cloud/bin/yc" serverless container get \
             --name linka-identity --format json | jq -er .url)"
+          container_url="${container_url%/}"
           iam_token="$("$HOME/yandex-cloud/bin/yc" iam create-token)"
           for attempt in $(seq 1 12); do
             if tick_response="$(curl --fail --silent --show-error \
