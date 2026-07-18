@@ -12,8 +12,6 @@ import (
 	"runtime/debug"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/linka-cloud/linka.identity/internal/authz"
 	"github.com/linka-cloud/linka.identity/internal/domain"
 	"github.com/linka-cloud/linka.identity/internal/ids"
@@ -170,22 +168,10 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		status, code = http.StatusBadRequest, "invalid_request"
 	case errors.Is(err, domain.ErrForbidden):
 		status, code = http.StatusForbidden, "forbidden"
-	case errors.Is(err, domain.ErrNotFound), errors.Is(err, pgx.ErrNoRows):
+	case errors.Is(err, domain.ErrNotFound):
 		status, code = http.StatusNotFound, "not_found"
 	case errors.Is(err, domain.ErrConflict):
 		status, code = http.StatusConflict, "conflict"
-	default:
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) {
-			switch pgErr.Code {
-			case "23503":
-				status, code = http.StatusNotFound, "not_found"
-			case "23505":
-				status, code = http.StatusConflict, "conflict"
-			case "23514", "22001", "22P02":
-				status, code = http.StatusBadRequest, "invalid_request"
-			}
-		}
 	}
 	if status == http.StatusInternalServerError {
 		s.logger.Error("request failed", "request_id", requestID(r.Context()), "error_type", fmt.Sprintf("%T", err))

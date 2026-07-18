@@ -27,11 +27,11 @@ paths:
   /readyz:
     get:
       operationId: readiness
-      summary: Report PostgreSQL and schema readiness
+      summary: Report YDB and schema readiness
       security: []
       responses:
         "200":
-          description: PostgreSQL is reachable and the current migration is applied
+          description: YDB is reachable and the current idempotent schema version is applied
           content:
             application/json:
               schema:

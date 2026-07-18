@@ -1,43 +1,54 @@
 # Production controls
 
-## Runtime and IAM
+## Serverless YDB
 
-Production must set `DEPLOYMENT_ENVIRONMENT=production`, `EMAIL_KEY_PROVIDER=yandex-kms`, and `REQUIRE_OUTBOX_DELIVERY=true`. The process refuses to start with a local KEK or optional outbox delivery.
+Use a Serverless YDB database with the free-tier-oriented limits explicitly recorded in infrastructure review:
 
-The runtime service account needs only:
+- provisioned capacity: `0 provisioned RCU`;
+- storage limit: `5 GB`;
+- request throttling limit: `10 RCU`;
+- system backup retention: `7 days`.
 
-- `lockbox.payloadViewer` for the referenced runtime secret version;
-- `kms.keys.encrypterDecrypter` for every active or retiring email KMS key;
-- `container-registry.images.puller` for the immutable image.
+The 7-day system backup is not PITR. Capacity and storage alerts must fire before limits affect identity, outbox, or deletion work. If usage no longer fits these limits, obtain product approval before changing the cost profile.
 
-Lockbox stores `DATABASE_URL`, workload credentials, product registry, pairwise HMAC key, blind-index keyring, signing keyring, and the KMS alias-to-key-ID map. Secret payloads are never Terraform variables or image build arguments.
+Set `YDB_ENDPOINT` to the public `grpcs` Serverless YDB endpoint and `YDB_DATABASE` to its absolute path. The Serverless Container uses metadata IAM credentials (`YDB_METADATA_CREDENTIALS=1`). No VPC connector or managed PostgreSQL network is required or configured.
+
+## IAM and secrets
+
+Production sets `DEPLOYMENT_ENVIRONMENT=production`, `EMAIL_KEY_PROVIDER=yandex-kms`, and `REQUIRE_OUTBOX_DELIVERY=true`.
+
+Runtime service account permissions:
+
+- least-privilege read/write access to the Identity YDB tables;
+- `lockbox.payloadViewer` for referenced runtime secret versions;
+- `kms.keys.encrypterDecrypter` for active and retiring email KMS keys;
+- `container-registry.images.puller` for the exact image digest.
+
+The deploy service account additionally applies YDB schema. Its key JSON is allowed only in GitHub Actions/local schema jobs, is mounted read-only, and is never injected into the runtime revision.
+
+Lockbox stores workload credentials, product registry, pairwise HMAC key, blind-index keyring, signing keyring, and KMS alias map. `YDB_ENDPOINT` and `YDB_DATABASE` are non-secret environment values. Production KMS key material never enters Lockbox or the application.
+
+## Release ordering
+
+`.github/workflows/publish.yml` publishes `sha-<commit>` from the exact CI-tested commit. Deployment mirrors that image, resolves its `sha256:` registry digest, and uses the digest for both steps:
+
+1. Run `/usr/local/bin/schema` against Serverless YDB with the deploy service-account key.
+2. Only after schema succeeds, create the runtime revision with metadata auth and Lockbox references.
+3. Verify `/readyz` and JWKS.
+
+No `DATABASE_URL`, PostgreSQL migration, mutable deployment tag, VPC connector, or service-account-key JSON exists in the runtime revision.
 
 ## Gateway limits
 
-Do not expose the Serverless Container invocation endpoint publicly. Route the Identity domain through API Gateway or Smart Web Security and configure, at minimum:
+Do not expose the raw Serverless Container invocation endpoint. Route through the approved gateway/SWS control and enforce at minimum:
 
-- global sustained limit: 20 requests/second, burst 40;
+- global sustained 20 requests/second, burst 40;
 - `/v1/email-verifications`: 5 requests/minute per source and workload;
 - `/v1/tokens`: 30 requests/minute per workload;
-- request body limit: 64 KiB and header limit: 1 MiB;
-- upstream timeout: 30 seconds.
+- request body 64 KiB, headers 1 MiB, upstream timeout 30 seconds.
 
-YC API Gateway quota ceilings are folder controls and are not managed by the current Terraform provider. The production environment owner must record the quota request and rate-limit policy as an environment approval before enabling the deploy workflow. Alert on sustained `429`, rejected body size, and quota utilization above 80%.
+Record gateway quota/rate-limit approval and alert on sustained `429`, rejected request size, and quota utilization above 80%.
 
-## PostgreSQL backup and PITR
+## Staging
 
-Use PostgreSQL 17 with TLS verification, encrypted storage, automated backups, and point-in-time recovery. Production startup rejects `DATABASE_URL` unless it uses `sslmode=verify-full`. Minimum production policy:
-
-- backup at least every six hours;
-- retain backups and WAL/PITR coverage for 35 days unless legal policy requires less;
-- run a restore into an isolated project monthly;
-- verify migration marker, row counts, privacy-step consistency, and `/readyz` against the restored database;
-- document how live erasure and backup expiry satisfy the approved deletion policy.
-
-`/readyz` is successful only when PostgreSQL is reachable, migration `0005_privacy_fanout_cancellation.sql` is applied, and required outbox delivery has no stale or manual-DLQ rows. Deployment runs the immutable migration image before replacing the application revision, then checks readiness and JWKS.
-
-## Release and staging smoke
-
-`.github/workflows/publish.yml` publishes only `sha-<commit>` images from the exact CI-tested commit. `.github/workflows/deploy-yc.yml` checks out the same commit/ref, runs its migration binary, deploys Lockbox references, and performs readiness/JWKS smoke checks.
-
-Before production promotion, run `.github/workflows/staging-preflight.yml`. It verifies JWKS, creates and verifies an email identity, checks that an account JWT contains both account subject and pairwise person keys, ingests a Metric batch, requests linked account/installation deletion, and waits for terminal PostgreSQL completion.
+Run `.github/workflows/staging-preflight.yml` before promotion. It verifies JWKS, verified-account creation, pairwise account/person claims, Metric ingest, linked deletion fan-out, receipts, and final YDB erasure completion.

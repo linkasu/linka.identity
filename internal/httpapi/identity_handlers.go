@@ -1,11 +1,9 @@
 package httpapi
 
 import (
-	"errors"
 	"net/http"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/linka-cloud/linka.identity/internal/domain"
 	"github.com/linka-cloud/linka.identity/internal/ids"
 	"github.com/linka-cloud/linka.identity/internal/pairwise"
@@ -192,10 +190,6 @@ func (s *Server) issueToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.store.ResolveTokenSubject(r.Context(), productID, resolved.SubjectType, resolved.SubjectID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			s.fail(w, r, domain.ErrNotFound)
-			return
-		}
 		s.fail(w, r, err)
 		return
 	}

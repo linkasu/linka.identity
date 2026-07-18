@@ -4,54 +4,33 @@
 
 | Data | Classification | Storage |
 | --- | --- | --- |
-| Raw email | Direct identifier, highest sensitivity in this service | Never persisted; transient process memory only |
-| Encrypted email envelope | Sensitive encrypted data | Pending `email_verifications` and active `email_identities`; consumed verification envelopes are deleted |
-| Verification evidence metadata | Sensitive audit data without email | PostgreSQL `email_verification_audit`, linked to person/installation for erasure |
-| Email blind index | Sensitive pseudonymous lookup key | PostgreSQL `email_identities` |
-| Person/account/installation UUID | Pseudonymous root identifier | PostgreSQL only |
-| Pairwise subject key | Product/audience-specific pseudonym | Product responses, JWT, and Metric control events |
-| Age category and guardian relationship | Sensitive profile data | PostgreSQL `persons`; never JWT or outbox |
-| Organization submission | Potentially identifying free text | PostgreSQL only |
-| Consent/privacy status | Sensitive compliance record | PostgreSQL only |
-| Outbox payload | Pseudonymous control-plane event | PostgreSQL and configured telemetry-control sink |
+| Raw email | Direct identifier, highest sensitivity | Transient process memory only; never persisted |
+| Encrypted email envelope | Sensitive encrypted data | YDB `email_verifications` and `email_identities` |
+| Verification evidence | Sensitive email-free audit | YDB `email_verification_audit` |
+| Email blind index | Sensitive pseudonymous lookup | YDB `email_blind_indexes` |
+| Root person/account/installation ID | Pseudonymous root | YDB only |
+| Pairwise subject key | Product/audience pseudonym | API, JWT, and Metric controls |
+| Age/guardian relationship | Sensitive profile | YDB `persons`; never JWT/outbox |
+| Organization submission | Potentially identifying free text | YDB only |
+| Consent/privacy/preference | Sensitive compliance state | YDB only |
+| Outbox payload | Pseudonymous control event | YDB and Metric control sink |
 
-No email field belongs in ClickHouse, telemetry events, JWTs, logs, traces, metrics labels, error messages, or organization records. This is an architectural rule, not merely a current implementation detail.
+Email never belongs in telemetry, JWTs, logs, traces, metric labels, error messages, organization records, or outbox payloads.
 
 ## Email processing
 
-1. The authenticated request body is decoded with a strict size limit and unknown-field rejection.
-2. A mailbox-only address is normalized by trimming outer whitespace and applying lowercase. Display-name forms are rejected.
-3. The service computes namespace/scope-bound HMAC indexes for lookup.
-4. For a new identity, the key provider generates a random 256-bit data key and returns it wrapped by the configured KEK/KMS key.
-5. The normalized email is encrypted with AES-256-GCM and bound to identity metadata as additional authenticated data.
-6. The plaintext data key is cleared after use. Go strings cannot be reliably zeroized, so process memory remains a residual risk.
+The API strictly bounds and decodes the body, rejects display-name addresses, normalizes the mailbox in memory, computes scope-bound HMAC indexes, and encrypts with a random AES-256-GCM data key. YC KMS wraps that data key in production. Ciphertext additional authenticated data binds the identity or verification ID and scope metadata.
 
-The bundled local AES key provider satisfies dependency injection and local operation. Production must replace it with a cloud/HSM KMS implementation so the service does not hold a long-lived KEK in an environment variable.
+Consumed verification ciphertext is deleted and replaced by email-free evidence metadata. Expired unconsumed challenges are removed by a bounded cleanup worker. Go strings cannot be reliably zeroized, so process memory remains a documented residual risk.
 
-## Isolation rules
+## Isolation and control
 
-Donation identities are intentionally non-transitive: the `donation` namespace is separate and the database rejects global donation scope. No background process reconciles donation indexes with account indexes.
+Donation and account namespaces have distinct blind-index keys and donation scope cannot become global. Anonymous installations need no person/account. Minor global linkage is disabled by default; age/relationship records are not proof of authority or consent.
 
-Anonymous installation records require no person or account. Linking occurs only after a separately attested email verification and uses an installation pairwise key, never a caller-supplied root UUID.
+Consent and telemetry preference have no inferred default. A denial atomically emits a suppression event. Deletion fans out all relevant pairwise aliases, waits for request-ID-bound Metric completion receipts, then erases/anonymizes live YDB records. Cancellation/rejection and erasure are mutually serialized and optimistic version checks reject stale workers.
 
-Minor cross-product linkage is disabled by default. Age category and optional guardian relationship are records, not verification. The code does not infer guardian authority or consent from relationship text.
+## Retention and backup
 
-## Consent and telemetry
+Retention periods remain legal/product decisions. Production owners must define periods for encrypted identities, installations, submissions, consent evidence, privacy requests, delivered outbox/audit rows, and logs. Live deletion does not immediately remove the data from the Serverless YDB 7-day system backup; expiry and restoration controls must be included in the approved policy. No PITR claim is made.
 
-The API requires consent type, policy version, status, and source timestamp. It does not define policy versions, infer a lawful basis, or turn silence into consent.
-
-Telemetry preference likewise has no default row. `denied` creates a suppression control event transactionally. This service does not send behavioral telemetry.
-
-## Privacy requests
-
-The service records product-scoped or person-wide deletion requests and exposes request status. Anonymous installations can request only product scope. Deletion fans out all relevant person/account/installation pairwise keys per product, aggregates terminal receipts, then erases or anonymizes PostgreSQL records. Cancellation/rejection cancels worker steps and cannot complete or erase. Export requests are rejected until export assembly and approval policy exists.
-
-The database trigger rejects `completed` while any downstream or PostgreSQL step is incomplete. A pending HTTP acceptance from Metric is not evidence of deletion completion.
-
-## Retention
-
-No retention periods are encoded because they are legal/product decisions. Production owners must define and implement periods for encrypted identities, anonymous installations, organization submissions, consent evidence, privacy requests, delivered outbox records, logs, and backups. Database deletion and backup expiry must be aligned.
-
-## Export constraints
-
-Any future export worker must decrypt email only for a verified request, through a narrowly authorized KMS path, and write to a short-lived encrypted artifact store. It must never put decrypted email into job payloads, logs, filenames, or analytics systems.
+Any future export path requires separately verified authorization and short-lived encrypted artifacts. It must never put decrypted email into job payloads, logs, filenames, or analytics.

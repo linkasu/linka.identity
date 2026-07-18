@@ -22,8 +22,8 @@ type Product struct {
 type Config struct {
 	Environment              string
 	HTTPAddr                 string
-	DatabaseURL              string
-	DatabaseMaxConnections   int32
+	YDBEndpoint              string
+	YDBDatabase              string
 	Workloads                []authz.Workload
 	Products                 map[string]Product
 	PairwiseIDKey            []byte
@@ -62,19 +62,34 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, errors.New("DEPLOYMENT_ENVIRONMENT must be development or production")
 	}
 	cfg.HTTPAddr = valueOrDefault(lookup, "HTTP_ADDR", ":8080")
-	cfg.DatabaseURL, err = required(lookup, "DATABASE_URL")
+	cfg.YDBEndpoint, err = required(lookup, "YDB_ENDPOINT")
 	if err != nil {
 		return Config{}, err
+	}
+	ydbEndpoint, parseErr := url.Parse(cfg.YDBEndpoint)
+	if parseErr != nil || ydbEndpoint.Host == "" || (ydbEndpoint.Scheme != "grpc" && ydbEndpoint.Scheme != "grpcs") || ydbEndpoint.Path != "" || ydbEndpoint.RawQuery != "" || ydbEndpoint.Fragment != "" || ydbEndpoint.User != nil {
+		return Config{}, errors.New("YDB_ENDPOINT must be a grpc or grpcs endpoint without credentials, path, query, or fragment")
+	}
+	cfg.YDBDatabase, err = required(lookup, "YDB_DATABASE")
+	if err != nil {
+		return Config{}, err
+	}
+	if !strings.HasPrefix(cfg.YDBDatabase, "/") || strings.ContainsAny(cfg.YDBDatabase, "?#") {
+		return Config{}, errors.New("YDB_DATABASE must be an absolute YDB database path")
 	}
 	if cfg.Environment == "production" {
-		databaseURL, parseErr := url.Parse(cfg.DatabaseURL)
-		if parseErr != nil || databaseURL.Query().Get("sslmode") != "verify-full" {
-			return Config{}, errors.New("production DATABASE_URL must use sslmode=verify-full")
+		if ydbEndpoint.Scheme != "grpcs" {
+			return Config{}, errors.New("production YDB_ENDPOINT must use grpcs")
 		}
-	}
-	cfg.DatabaseMaxConnections, err = int32Value(lookup, "DATABASE_MAX_CONNECTIONS", 10, 1, 100)
-	if err != nil {
-		return Config{}, err
+		if valueOrDefault(lookup, "YDB_METADATA_CREDENTIALS", "") != "1" {
+			return Config{}, errors.New("production runtime requires YDB_METADATA_CREDENTIALS=1")
+		}
+		if value, ok := lookup("YDB_SERVICE_ACCOUNT_KEY_FILE_CREDENTIALS"); ok && strings.TrimSpace(value) != "" {
+			return Config{}, errors.New("service-account-key credentials are forbidden in production runtime")
+		}
+		if value, ok := lookup("YDB_SERVICE_ACCOUNT_KEY_CREDENTIALS"); ok && strings.TrimSpace(value) != "" {
+			return Config{}, errors.New("inline service-account-key credentials are forbidden in production runtime")
+		}
 	}
 	cfg.Workloads, err = workloads(lookup)
 	if err != nil {
@@ -360,11 +375,6 @@ func intValue(lookup func(string) (string, bool), name string, fallback, min, ma
 		return 0, fmt.Errorf("%s must be an integer between %d and %d", name, min, max)
 	}
 	return value, nil
-}
-
-func int32Value(lookup func(string) (string, bool), name string, fallback, min, max int) (int32, error) {
-	value, err := intValue(lookup, name, fallback, min, max)
-	return int32(value), err
 }
 
 func durationValue(lookup func(string) (string, bool), name string, fallback time.Duration) (time.Duration, error) {

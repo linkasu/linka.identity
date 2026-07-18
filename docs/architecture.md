@@ -2,68 +2,50 @@
 
 ## Components
 
-- `cmd/identity` runs the HTTP API and optional outbox delivery worker.
-- `cmd/migrate` applies embedded, checksummed PostgreSQL migrations.
-- `internal/service` owns identity-linking policy and the email encryption flow.
-- `internal/store` owns SQL persistence and transactions.
-- `internal/cryptokit` defines the injectable `KeyProvider`, local envelope implementation, and versioned blind indexes.
-- `internal/authz` authenticates independent workloads and enforces role/product scopes.
-- `internal/pairwise` derives product/audience/type-separated opaque subject keys.
-- `internal/token` signs Ed25519 JWTs and exposes active and retiring public keys as JWKS.
-- `internal/outbox` delivers suppression/deletion events with at-least-once semantics.
+- `cmd/identity` runs the HTTP API and workers.
+- `cmd/schema` applies the idempotent YDB schema before a revision starts.
+- `internal/service` owns identity-linking policy and in-memory email processing.
+- `internal/store` owns native YDB Query API persistence and transactions.
+- `internal/schema` defines the current YDB tables and schema marker.
+- `internal/cryptokit` provides envelope encryption, YC KMS wrapping, and versioned blind indexes.
+- `internal/authz`, `internal/pairwise`, and `internal/token` provide workload RBAC, pairwise IDs, and Ed25519 JWTs.
+- `internal/outbox`, `internal/privacyworker`, and `internal/verificationworker` deliver controls, orchestrate deletion, and remove expired challenges.
 
-The HTTP process does not apply migrations automatically. Deployment must complete the migration job before replacing service instances.
+The HTTP process never applies DDL. Deployment runs the schema binary from the same exact image digest before creating a new revision.
 
-## Identity model
+## YDB model
 
-`persons` is the internal subject root. Root UUIDs remain inside PostgreSQL. Product responses and JWTs use aliases from `subject_aliases`; aliases are pairwise across product, audience, and subject type. A person can have zero or one `accounts` row, and installations can remain anonymous indefinitely.
+`persons` is the internal subject root. Accounts are optional and installations can remain anonymous. `subject_aliases` stores product/audience/type-separated pairwise identifiers; root IDs never cross the API boundary.
 
-An email identity records:
+Email data is split between:
 
-- envelope ciphertext, nonce, wrapped data key, algorithm, and KMS key ID;
-- an HMAC-SHA-256 blind index and explicit key version;
-- identity namespace (`account` or `donation`);
-- linkage scope (`product` or `global`) and scope key;
-- origin product and owning person.
+- `email_identities`, containing envelope ciphertext, nonce, wrapped data key, KMS alias, algorithm, and ownership metadata;
+- `email_blind_indexes`, keyed by namespace, linkage scope, scope key, key version, and HMAC value;
+- `email_verifications`, containing short-lived encrypted challenges and optimistic claim state;
+- `email_verification_audit`, containing email-free ownership evidence after successful consumption.
 
-The blind-index message is `namespace NUL linkage_scope NUL scope_key NUL normalized_email`. This prevents the same email from producing a common index across donation/account or product/global boundaries. All configured versions are queried, while only the current version is inserted. Rotation therefore supports a read-old/write-new interval.
+The blind-index message is `namespace NUL linkage_scope NUL scope_key NUL normalized_email`. Every configured version is queried and only the current version is written. A deterministic blind-index primary key replaces PostgreSQL advisory locks: concurrent creators touch the same key and YDB serializable conflict handling retries one transaction against committed state.
 
-Email enters a pending encrypted verification row. Only an `email_verifier` workload can attach external evidence; only then may a product workload consume the challenge. Identity creation uses a PostgreSQL transaction and `pg_advisory_xact_lock` derived from the current blind index.
+Organization, membership, consent, preference, privacy request/step, outbox, and audit tables use explicit keys. Mutable race-sensitive rows have a `version` column. Operations read the expected version and use `UPDATE ... WHERE version = $version RETURNING version`; a mismatch is a conflict. Multi-row business operations use native YDB `SerializableReadWrite` transactions.
 
 ## Linkage policy
 
 - Product scope is the default.
-- Donation namespace is forced to product scope even if a caller asks for global linkage.
-- Global account linkage requires `link_across_products=true` and an explicit age category.
-- `unknown` age cannot use global linkage.
-- `minor` cannot use global linkage unless the deployment explicitly sets `MINOR_CROSS_PRODUCT_LINKING_ENABLED=true`.
+- Donation scope is always product-local.
+- Global account linkage requires explicit `link_across_products=true` and a known age category.
+- Unknown age cannot use global linkage.
+- Minor global linkage additionally requires the disabled-by-default feature flag.
 
-The feature flag only opens the technical path. It does not establish consent, legal basis, guardian verification, or product policy. Those controls must be designed before enabling it.
+The feature flag is only a technical gate and does not establish consent, guardian authority, or legal basis.
 
-## Organizations
+## Privacy and outbox
 
-Free-text `organization_submissions` remain separate from canonical `organizations`. Internal review either rejects a pending submission or matches it to a canonical row with actor and audit note. Canonical merges are serializable transactions that:
+A transition to telemetry `denied` persists the preference and suppression event atomically. Repeated denial creates no duplicate event.
 
-- mark the source as merged;
-- write immutable `organization_merge_audit` data;
-- redirect matched submissions;
-- move non-conflicting memberships and remove duplicates.
+A deletion request creates one Metric step for each relevant person/account/linked-installation alias and one final `ydb` erasure step. The erasure worker re-checks the parent finite-state-machine state and all Metric receipts in the same serializable transaction before deleting or anonymizing live data. Only then does it mark the request `completed` and append audit evidence.
 
-## Privacy control and outbox
+Workers claim rows by expected version and five-minute lease. Concurrent claims conflict serializably; stale leases can be reclaimed. Delivery is at least once and the consumer deduplicates by event ID. Cancellation/rejection and claims read the same parent request, so they cannot race into later erasure.
 
-Telemetry preference is explicit `allowed` or `denied`; absence means no preference has been recorded. A transition to `denied` writes `telemetry.suppression.requested` in the same transaction. Repeating `denied` does not create another event.
+## Tokens
 
-A deletion request creates one Metric step for every relevant person, account, and linked-installation alias in every product plus one PostgreSQL step. PostgreSQL erasure cannot claim until every alias receipt is completed. A database trigger independently prevents premature request completion.
-
-Manual state changes follow a finite-state machine but cannot set `completed`; completion belongs exclusively to the erasure orchestrator. Every accepted change records the authenticated workload actor, note, status, and time.
-
-Workers claim rows with `FOR UPDATE SKIP LOCKED`, lease them for five minutes, and send JSON over authenticated HTTP. Delivery is at least once; consumers must deduplicate by outbox event `id`. Payloads contain opaque IDs, product/scope, and timestamps, never email.
-
-## Token model
-
-JWTs use Ed25519 and include only:
-
-- issuer, audience/product, subject, subject type;
-- issued/expiry time and unique token ID.
-
-The subject is a 64-character pairwise opaque key. JWTs also contain scopes and a unique token ID. Email, root UUIDs, organization text, age, consent, and telemetry preference are excluded. TTL is bounded and active/retiring public keys are available through `/.well-known/jwks.json`.
+JWTs contain issuer, audience/product, pairwise subject, subject type, scopes, issued/expiry time, and token ID. Account tokens may include a separate pairwise person key. Email, root IDs, organization text, age, consent, and preferences are excluded.

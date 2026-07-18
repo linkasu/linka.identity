@@ -3,8 +3,11 @@ package store
 import (
 	"context"
 	"errors"
+	"time"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/linka-cloud/linka.identity/internal/domain"
+	"github.com/ydb-platform/ydb-go-sdk/v3"
+	"github.com/ydb-platform/ydb-go-sdk/v3/query"
 )
 
 type ResolvedAlias struct {
@@ -17,66 +20,193 @@ type ResolvedAlias struct {
 }
 
 func (s *Store) EnsureSubjectAlias(ctx context.Context, opaqueKey, productID, audience, subjectType, subjectID string) error {
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO subject_aliases (opaque_key, product_id, audience, subject_type, subject_id)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (product_id, audience, subject_type, subject_id) DO UPDATE
-		SET opaque_key = EXCLUDED.opaque_key
-		WHERE subject_aliases.opaque_key = EXCLUDED.opaque_key`, opaqueKey, productID, audience, subjectType, subjectID)
-	return err
+	return s.serializable(ctx, func(ctx context.Context, tx query.TxActor) error {
+		personID, err := aliasPersonID(ctx, tx, subjectType, subjectID)
+		if err != nil {
+			return err
+		}
+		row, err := tx.QueryRow(ctx, `
+			DECLARE $opaque_key AS Utf8;
+			SELECT product_id, audience, subject_type, subject_id
+			FROM subject_aliases WHERE opaque_key = $opaque_key;`,
+			query.WithParameters(ydb.ParamsBuilder().Param("$opaque_key").Text(opaqueKey).Build()))
+		if err == nil {
+			var storedProduct, storedAudience, storedType, storedID string
+			if err := row.Scan(&storedProduct, &storedAudience, &storedType, &storedID); err != nil {
+				return err
+			}
+			if storedProduct != productID || storedAudience != audience || storedType != subjectType || storedID != subjectID {
+				return domain.ErrConflict
+			}
+			return nil
+		}
+		if !errors.Is(err, query.ErrNoRows) {
+			return err
+		}
+		keyRow, err := tx.QueryRow(ctx, `
+			DECLARE $product_id AS Utf8;
+			DECLARE $audience AS Utf8;
+			DECLARE $subject_type AS Utf8;
+			DECLARE $subject_id AS Utf8;
+			SELECT opaque_key FROM subject_alias_keys
+			WHERE product_id = $product_id AND audience = $audience
+			  AND subject_type = $subject_type AND subject_id = $subject_id;`,
+			query.WithParameters(ydb.ParamsBuilder().
+				Param("$product_id").Text(productID).
+				Param("$audience").Text(audience).
+				Param("$subject_type").Text(subjectType).
+				Param("$subject_id").Text(subjectID).
+				Build()))
+		if err == nil {
+			var storedKey string
+			if err := keyRow.Scan(&storedKey); err != nil {
+				return err
+			}
+			if storedKey != opaqueKey {
+				return domain.ErrConflict
+			}
+			return nil
+		}
+		if !errors.Is(err, query.ErrNoRows) {
+			return err
+		}
+		return tx.Exec(ctx, `
+			DECLARE $opaque_key AS Utf8;
+			DECLARE $product_id AS Utf8;
+			DECLARE $audience AS Utf8;
+			DECLARE $subject_type AS Utf8;
+			DECLARE $subject_id AS Utf8;
+			DECLARE $person_id AS Utf8?;
+			DECLARE $now AS Timestamp;
+			INSERT INTO subject_aliases (
+				opaque_key, product_id, audience, subject_type, subject_id, person_id, created_at
+			) VALUES ($opaque_key, $product_id, $audience, $subject_type, $subject_id, $person_id, $now);
+			INSERT INTO subject_alias_keys (
+				product_id, audience, subject_type, subject_id, opaque_key
+			) VALUES ($product_id, $audience, $subject_type, $subject_id, $opaque_key);`,
+			query.WithParameters(ydb.ParamsBuilder().
+				Param("$opaque_key").Text(opaqueKey).
+				Param("$product_id").Text(productID).
+				Param("$audience").Text(audience).
+				Param("$subject_type").Text(subjectType).
+				Param("$subject_id").Text(subjectID).
+				Param("$person_id").Any(nullableText(personID)).
+				Param("$now").Timestamp(s.now().UTC()).
+				Build()))
+	})
+}
+
+func aliasPersonID(ctx context.Context, executor query.Executor, subjectType, subjectID string) (*string, error) {
+	switch subjectType {
+	case "person":
+		if err := validateSubjectWith(ctx, executor, Subject{Kind: "person", ID: subjectID}, ""); err != nil {
+			return nil, err
+		}
+		return &subjectID, nil
+	case "account":
+		row, err := executor.QueryRow(ctx, `
+			DECLARE $id AS Utf8;
+			SELECT person_id, status FROM accounts WHERE id = $id;`,
+			query.WithParameters(ydb.ParamsBuilder().Param("$id").Text(subjectID).Build()))
+		if err != nil {
+			return nil, noRows(err)
+		}
+		var personID, status string
+		if err := row.Scan(&personID, &status); err != nil {
+			return nil, err
+		}
+		if status != "active" {
+			return nil, domain.ErrNotFound
+		}
+		return &personID, nil
+	case "installation":
+		row, err := executor.QueryRow(ctx, `
+			DECLARE $id AS Utf8;
+			SELECT person_id, disabled_at FROM product_installations WHERE id = $id;`,
+			query.WithParameters(ydb.ParamsBuilder().Param("$id").Text(subjectID).Build()))
+		if err != nil {
+			return nil, noRows(err)
+		}
+		var personID *string
+		var disabledAt *time.Time
+		if err := row.Scan(&personID, &disabledAt); err != nil {
+			return nil, err
+		}
+		if disabledAt != nil {
+			return nil, domain.ErrNotFound
+		}
+		return personID, nil
+	default:
+		return nil, domain.ErrNotFound
+	}
 }
 
 func (s *Store) ResolveSubjectAlias(ctx context.Context, opaqueKey, productID, audience string) (ResolvedAlias, error) {
-	var result ResolvedAlias
-	err := s.pool.QueryRow(ctx, `
-		SELECT alias.opaque_key, alias.subject_type, alias.subject_id::text, alias.product_id, alias.audience,
-		       CASE alias.subject_type
-		           WHEN 'person' THEN alias.subject_id::text
-		           WHEN 'account' THEN COALESCE(account.person_id::text, '')
-		           WHEN 'installation' THEN COALESCE(installation.person_id::text, '')
-		       END
-		FROM subject_aliases alias
-		LEFT JOIN accounts account ON alias.subject_type = 'account' AND account.id = alias.subject_id AND account.status = 'active'
-		LEFT JOIN product_installations installation ON alias.subject_type = 'installation' AND installation.id = alias.subject_id AND installation.disabled_at IS NULL
-		WHERE alias.opaque_key = $1 AND alias.product_id = $2 AND alias.audience = $3`,
-		opaqueKey, productID, audience).Scan(&result.OpaqueKey, &result.SubjectType, &result.SubjectID, &result.ProductID, &result.Audience, &result.PersonID)
+	row, err := s.client.QueryRow(ctx, `
+		DECLARE $opaque_key AS Utf8;
+		SELECT product_id, audience, subject_type, subject_id, person_id
+		FROM subject_aliases WHERE opaque_key = $opaque_key;`,
+		query.WithParameters(ydb.ParamsBuilder().Param("$opaque_key").Text(opaqueKey).Build()),
+		query.WithTxControl(query.SnapshotReadOnlyTxControl()))
 	if err != nil {
+		return ResolvedAlias{}, noRows(err)
+	}
+	result := ResolvedAlias{OpaqueKey: opaqueKey}
+	var personID *string
+	if err := row.Scan(&result.ProductID, &result.Audience, &result.SubjectType, &result.SubjectID, &personID); err != nil {
 		return ResolvedAlias{}, err
 	}
-	if result.SubjectType == "account" && result.PersonID == "" {
-		return ResolvedAlias{}, pgx.ErrNoRows
+	if result.ProductID != productID || result.Audience != audience {
+		return ResolvedAlias{}, domain.ErrNotFound
+	}
+	if personID != nil {
+		result.PersonID = *personID
+	}
+	if _, err := aliasPersonID(ctx, s.client, result.SubjectType, result.SubjectID); err != nil {
+		return ResolvedAlias{}, err
 	}
 	return result, nil
 }
 
 func (s *Store) PrivacyFanoutAliases(ctx context.Context, personID string, productID *string) ([]ResolvedAlias, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT alias.opaque_key, alias.subject_type, alias.subject_id::text, alias.product_id, alias.audience, $1::uuid::text
-		FROM subject_aliases alias
-		LEFT JOIN accounts account ON alias.subject_type = 'account' AND account.id = alias.subject_id
-		LEFT JOIN product_installations installation ON alias.subject_type = 'installation' AND installation.id = alias.subject_id
-		WHERE ($2::text IS NULL OR alias.product_id = $2)
-		  AND ((alias.subject_type = 'person' AND alias.subject_id = $1) OR
-		       (alias.subject_type = 'account' AND account.person_id = $1) OR
-		       (alias.subject_type = 'installation' AND installation.person_id = $1))
-		ORDER BY alias.product_id,
-		         CASE alias.subject_type WHEN 'person' THEN 1 WHEN 'account' THEN 2 ELSE 3 END,
-		         alias.opaque_key`,
-		personID, productID)
+	return privacyFanoutAliases(ctx, s.client, personID, productID)
+}
+
+func privacyFanoutAliases(ctx context.Context, executor query.Executor, personID string, productID *string) ([]ResolvedAlias, error) {
+	statement := `
+		DECLARE $person_id AS Utf8;
+		SELECT opaque_key, subject_type, subject_id, product_id, audience
+		FROM subject_aliases WHERE person_id = $person_id
+		ORDER BY product_id, subject_type, opaque_key;`
+	parameters := ydb.ParamsBuilder().Param("$person_id").Text(personID).Build()
+	if productID != nil {
+		statement = `
+			DECLARE $person_id AS Utf8;
+			DECLARE $product_id AS Utf8;
+			SELECT opaque_key, subject_type, subject_id, product_id, audience
+			FROM subject_aliases WHERE person_id = $person_id AND product_id = $product_id
+			ORDER BY subject_type, opaque_key;`
+		parameters = ydb.ParamsBuilder().
+			Param("$person_id").Text(personID).
+			Param("$product_id").Text(*productID).
+			Build()
+	}
+	rows, err := executor.QueryResultSet(ctx, statement, query.WithParameters(parameters))
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close(ctx)
 	var result []ResolvedAlias
-	for rows.Next() {
+	for row, rowErr := range rows.Rows(ctx) {
+		if rowErr != nil {
+			return nil, rowErr
+		}
 		var alias ResolvedAlias
-		if err := rows.Scan(&alias.OpaqueKey, &alias.SubjectType, &alias.SubjectID, &alias.ProductID, &alias.Audience, &alias.PersonID); err != nil {
+		alias.PersonID = personID
+		if err := row.Scan(&alias.OpaqueKey, &alias.SubjectType, &alias.SubjectID, &alias.ProductID, &alias.Audience); err != nil {
 			return nil, err
 		}
 		result = append(result, alias)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	if len(result) == 0 {
 		return nil, errors.New("privacy request has no product aliases")

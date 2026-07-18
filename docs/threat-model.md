@@ -1,52 +1,33 @@
 # Threat model
 
-## Assets
+## Assets and boundaries
 
-- Email plaintext and envelope keys.
-- Blind-index keys and their version history.
-- Token signing keys, pairwise-ID key, and independent workload credentials.
-- Linkage graph among persons, accounts, installations, products, and organizations.
-- Consent, age category, guardian relationship, telemetry preference, and privacy-request evidence.
+Assets include email plaintext/envelopes, blind-index/signing/pairwise keys, workload credentials, linkage graph, organization text, consent, age, preferences, and privacy evidence.
 
-## Trust boundaries
-
-- Product backend to identity HTTP API.
-- Identity process to PostgreSQL.
-- Identity process to KMS/key provider.
-- Identity outbox worker to telemetry-control sink.
-- Token consumer to the JWKS endpoint.
-- Internal organization reviewer to merge/review endpoints.
-
-The service authenticates configured workloads and enforces roles/product scopes. It is not intended to be exposed directly to untrusted clients without a gateway, rate limits, and stronger platform workload identity.
+Trust boundaries are product backend to HTTP API, Identity to Serverless YDB, Identity to YC KMS/metadata/Lockbox, outbox to Metric, token consumer to JWKS, and organization/privacy administrators to internal routes.
 
 ## Threats and controls
 
-| Threat | Controls in this repository | Remaining work |
+| Threat | Repository control | Remaining work |
 | --- | --- | --- |
-| Database disclosure reveals email | Per-record random data key, AEAD ciphertext, wrapped key, no plaintext column | Production KMS, restricted decrypt role, rotation and audit |
-| Blind-index enumeration | HMAC with independent secret, namespace/scope binding, key versions | Protect keys in KMS/secret manager; rate-limit lookups |
-| Donation identity becomes account linkage | Separate namespace in index and schema; global donation scope rejected | Review every future reconciliation/export pipeline |
-| Minor linked across products accidentally | Product scope default, unknown age blocked, feature flag false by default | Formal consent/guardian and authorization design before enablement |
-| Email leaks through observability | No body/query/header logging; generic errors; no email claims/events | Configure proxies/APM/body capture and crash dumps consistently |
-| Token replay or cross-product use | Short configurable TTL, product audience, opaque subject, Ed25519 signature, token ID | Consumer audience/issuer checks, replay policy where required, key rotation |
-| Unauthenticated token minting | Constant-time per-workload credentials, roles, product scopes, verified-email gate | Add mTLS/platform workload identity and credential rotation automation |
-| Outbox event loss | Source and event share a transaction; retries, leases, terminal DLQ, required-delivery readiness | Alerting and escalation ownership |
-| Outbox duplication | Stable event ID, at-least-once contract | Consumer must persist idempotency key |
-| Forged organization audit actor | Audit actor is derived from the authenticated admin workload, never the request body | Add human reviewer identity where policy requires it |
-| Premature privacy completion | Metric request-ID-bound terminal receipt, downstream steps, PostgreSQL erasure step, completion trigger | Backup expiry and external evidence retention policy |
-| Privacy request abuse | Internal authentication, opaque IDs, explicit scope | Data-subject verification, anti-automation, approval workflow |
-| SQL injection | Parameterized SQL and strict enum/length checks | Dependency and query review |
-| Resource exhaustion | Request body/header/time limits, DB pool limit | Gateway rate limits, connection budgets, load tests |
+| YDB disclosure reveals email | Per-record data key, AEAD ciphertext, KMS-wrapped key, no plaintext column | Restrict decrypt role, audit and rotate keys |
+| Blind-index enumeration | Independent HMAC key, scope/namespace binding, versions | Protect keyring and rate-limit lookups |
+| Donation becomes account linkage | Separate namespace and forced product scope | Review future reconciliation/export jobs |
+| Minor linked accidentally | Product default, unknown blocked, minor flag off | Consent/guardian design before enablement |
+| Email leaks through observability | No body/query/header/parameter logging; generic errors; no email claims/events | Align gateway/APM/crash dumps |
+| Token replay/cross-product use | Short TTL, exact audience/product, pairwise subject, Ed25519, token ID | Consumer validation and replay policy |
+| Unauthorized token minting | Constant-time workload credentials, RBAC/product scopes, verified-email gate | Platform workload identity and rotation |
+| Lost/duplicate outbox event | Source/event serializable transaction, leases/retry/DLQ, stable ID | Consumer persists idempotency key |
+| Concurrent identity duplication | Deterministic blind-index primary key, serializable retry | Load-test hot keys and monitor aborts |
+| Stale worker overwrites state | `version` compare/update and serializable transactions | Alert on repeated conflicts/expired leases |
+| Premature privacy completion | Parent FSM, request-bound Metric receipts, final YDB step, same-transaction re-check | Backup expiry and external evidence policy |
+| Credential theft | Runtime metadata auth; key JSON only mounted in CI/local schema job | Short-lived CI federation when available |
+| Resource exhaustion/free-tier limit | Bounded HTTP/work batches, YDB limits and indexes | Gateway limits, capacity alerts, load tests |
 
-## Explicit non-goals
+The public Serverless YDB endpoint uses TLS and IAM; no VPC connector is required. Public endpoint does not mean anonymous access.
 
-- Password authentication, social login, MFA, or account recovery.
-- A legal determination that a consent event is valid.
-- Guardian identity proofing.
-- Automatic organization matching.
-- Direct ClickHouse or analytics writes.
-- Immediate erasure from backups; live PostgreSQL erasure is orchestrated, backup expiry remains operational policy.
+## Non-goals and review triggers
 
-## Security review triggers
+Password auth, social login, MFA, guardian proofing, automatic organization matching, direct analytics writes, and immediate backup erasure are out of scope.
 
-Require a fresh review before enabling minor linkage, adding any email decryption endpoint, changing normalization, introducing identity reconciliation, sending new outbox topics, exposing APIs to clients, changing token claims, or adding analytics integrations.
+Require security review before enabling minor linkage, adding email decryption/export, changing normalization, introducing reconciliation, adding outbox topics, exposing APIs to clients, changing token claims, changing YDB key/index design, or adding analytics integrations.

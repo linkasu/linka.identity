@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/linka-cloud/linka.identity/internal/cryptokit"
 	"github.com/linka-cloud/linka.identity/internal/domain"
 	"github.com/linka-cloud/linka.identity/internal/ids"
@@ -16,12 +15,20 @@ import (
 )
 
 type IdentityService struct {
-	store                    *store.Store
+	store                    IdentityStore
 	envelope                 *cryptokit.Envelope
 	indexer                  *cryptokit.BlindIndexer
 	minorCrossProductLinking bool
 	emailVerificationTTL     time.Duration
 	now                      func() time.Time
+}
+
+type IdentityStore interface {
+	CreateEmailVerification(context.Context, store.EmailVerification) error
+	ClaimVerifiedEmail(context.Context, string, string, string, time.Time, time.Duration) (store.EmailVerification, error)
+	ReleaseEmailVerification(context.Context, string, string) error
+	ConsumeEmailVerification(context.Context, string, string, string, time.Time) error
+	RegisterEmailIdentity(context.Context, store.NewEmailIdentity, []cryptokit.BlindIndex) (store.EmailIdentity, bool, error)
 }
 
 type RegisterEmailIdentityInput struct {
@@ -42,11 +49,11 @@ type RegisterEmailIdentityResult struct {
 	Created   bool
 }
 
-func NewIdentityService(database *store.Store, envelope *cryptokit.Envelope, indexer *cryptokit.BlindIndexer, minorCrossProductLinking bool) *IdentityService {
+func NewIdentityService(database IdentityStore, envelope *cryptokit.Envelope, indexer *cryptokit.BlindIndexer, minorCrossProductLinking bool) *IdentityService {
 	return NewIdentityServiceWithVerification(database, envelope, indexer, minorCrossProductLinking, 15*time.Minute)
 }
 
-func NewIdentityServiceWithVerification(database *store.Store, envelope *cryptokit.Envelope, indexer *cryptokit.BlindIndexer, minorCrossProductLinking bool, verificationTTL time.Duration) *IdentityService {
+func NewIdentityServiceWithVerification(database IdentityStore, envelope *cryptokit.Envelope, indexer *cryptokit.BlindIndexer, minorCrossProductLinking bool, verificationTTL time.Duration) *IdentityService {
 	return &IdentityService{
 		store:                    database,
 		envelope:                 envelope,
@@ -165,55 +172,6 @@ func (s *IdentityService) RegisterEmailIdentity(ctx context.Context, input Regis
 	currentIndex := s.indexer.Current(indexMessage)
 	allIndexes := s.indexer.All(indexMessage)
 
-	tx, err := s.store.Begin(ctx)
-	if err != nil {
-		return RegisterEmailIdentityResult{}, fmt.Errorf("begin identity transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	// The oldest configured index is stable while the database guard requires its key.
-	if err := store.LockBlindIndex(ctx, tx, allIndexes[0].Value); err != nil {
-		return RegisterEmailIdentityResult{}, err
-	}
-	existing, err := store.FindEmailIdentity(ctx, tx, input.Namespace, linkageScope, scopeKey, allIndexes)
-	if err == nil {
-		if existing.MatchedBlindIndexVersion != currentIndex.Version {
-			if err := store.UpsertEmailBlindIndex(ctx, tx, existing.IdentityID, currentIndex); err != nil {
-				return RegisterEmailIdentityResult{}, err
-			}
-		}
-		if err := store.MarkEmailIdentityVerified(ctx, tx, existing.IdentityID, input.VerifiedAt); err != nil {
-			return RegisterEmailIdentityResult{}, err
-		}
-		if input.CreateAccount && existing.AccountID == "" {
-			accountID, idErr := ids.NewUUID()
-			if idErr != nil {
-				return RegisterEmailIdentityResult{}, idErr
-			}
-			existing.AccountID, err = store.EnsureAccount(ctx, tx, accountID, existing.PersonID)
-			if err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return RegisterEmailIdentityResult{}, domain.ErrConflict
-				}
-				return RegisterEmailIdentityResult{}, err
-			}
-		}
-		if input.InstallationID != nil {
-			if err := store.LinkInstallation(ctx, tx, *input.InstallationID, input.ProductID, existing.PersonID); err != nil {
-				if errors.Is(err, pgx.ErrNoRows) {
-					return RegisterEmailIdentityResult{}, domain.ErrConflict
-				}
-				return RegisterEmailIdentityResult{}, err
-			}
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return RegisterEmailIdentityResult{}, err
-		}
-		return RegisterEmailIdentityResult{PersonID: existing.PersonID, AccountID: existing.AccountID}, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return RegisterEmailIdentityResult{}, err
-	}
-
 	personID, err := ids.NewUUID()
 	if err != nil {
 		return RegisterEmailIdentityResult{}, err
@@ -222,45 +180,32 @@ func (s *IdentityService) RegisterEmailIdentity(ctx context.Context, input Regis
 	if err != nil {
 		return RegisterEmailIdentityResult{}, err
 	}
-	if err := store.InsertPerson(ctx, tx, personID, input.AgeCategory, input.GuardianRelationship); err != nil {
-		return RegisterEmailIdentityResult{}, err
-	}
 	aad := []byte(strings.Join([]string{"email-v1", identityID, input.Namespace, linkageScope, scopeKey}, "\x00"))
 	encrypted, err := s.envelope.Encrypt(ctx, []byte(normalizedEmail), aad)
 	if err != nil {
 		return RegisterEmailIdentityResult{}, err
 	}
-	if err := store.InsertEmailIdentity(ctx, tx, store.NewEmailIdentity{
-		ID: identityID, PersonID: personID, ProductID: input.ProductID,
+	accountID, err := ids.NewUUID()
+	if err != nil {
+		return RegisterEmailIdentityResult{}, err
+	}
+	if input.CreateAccount {
+		// Keep the generated ID; the store uses it only when an account must be created.
+	} else {
+		accountID = ""
+	}
+	existing, created, err := s.store.RegisterEmailIdentity(ctx, store.NewEmailIdentity{
+		ID: identityID, PersonID: personID, AccountID: accountID, ProductID: input.ProductID,
 		Namespace: input.Namespace, LinkageScope: linkageScope, ScopeKey: scopeKey,
 		BlindIndexVersion: currentIndex.Version, BlindIndex: currentIndex.Value,
-		EncryptedEmail: encrypted, VerifiedAt: input.VerifiedAt,
-	}); err != nil {
-		return RegisterEmailIdentityResult{}, err
+		EncryptedEmail: encrypted, AgeCategory: input.AgeCategory,
+		GuardianRelationship: input.GuardianRelationship, VerifiedAt: input.VerifiedAt,
+		CreateAccount: input.CreateAccount, InstallationID: input.InstallationID,
+	}, allIndexes)
+	if err != nil {
+		return RegisterEmailIdentityResult{}, fmt.Errorf("register identity transaction: %w", err)
 	}
-	var accountID string
-	if input.CreateAccount {
-		newAccountID, err := ids.NewUUID()
-		if err != nil {
-			return RegisterEmailIdentityResult{}, err
-		}
-		accountID, err = store.EnsureAccount(ctx, tx, newAccountID, personID)
-		if err != nil {
-			return RegisterEmailIdentityResult{}, err
-		}
-	}
-	if input.InstallationID != nil {
-		if err := store.LinkInstallation(ctx, tx, *input.InstallationID, input.ProductID, personID); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return RegisterEmailIdentityResult{}, domain.ErrConflict
-			}
-			return RegisterEmailIdentityResult{}, err
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return RegisterEmailIdentityResult{}, err
-	}
-	return RegisterEmailIdentityResult{PersonID: personID, AccountID: accountID, Created: true}, nil
+	return RegisterEmailIdentityResult{PersonID: existing.PersonID, AccountID: existing.AccountID, Created: created}, nil
 }
 
 func (s *IdentityService) validateRegistration(input RegisterEmailIdentityInput) error {

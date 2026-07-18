@@ -40,6 +40,8 @@ jobs:
           test -n "${{ vars.IDENTITY_PUBLIC_URL }}"
           test -n "${{ vars.EMAIL_KEY_ACTIVE_ID }}"
           test -n "${{ vars.GATEWAY_RATE_LIMIT_POLICY_ID }}"
+          test -n "${{ vars.YDB_ENDPOINT }}"
+          test -n "${{ vars.YDB_DATABASE }}"
       - name: Install YC CLI
         run: curl -fsSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -a
       - name: Configure service account
@@ -53,7 +55,8 @@ jobs:
           "$HOME/yandex-cloud/bin/yc" config set service-account-key /tmp/yc-key.json
           "$HOME/yandex-cloud/bin/yc" config set cloud-id "$YC_CLOUD_ID"
           "$HOME/yandex-cloud/bin/yc" config set folder-id "$YC_FOLDER_ID"
-      - name: Mirror immutable image
+      - name: Mirror immutable image and resolve exact digest
+        id: mirror
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           YC_SA_KEY_JSON: ${{ secrets.YC_SA_KEY_JSON }}
@@ -64,19 +67,26 @@ jobs:
           docker buildx imagetools create \
             --tag "cr.yandex/$YC_REGISTRY_ID/linka-identity:$IMAGE_TAG" \
             "ghcr.io/linkasu/linka.identity:$IMAGE_TAG"
-      - name: Run immutable migration image
+          digest="$(docker buildx imagetools inspect \
+            "cr.yandex/$YC_REGISTRY_ID/linka-identity:$IMAGE_TAG" \
+            --format '{{json .Manifest.Digest}}' | jq -er '.')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'image_ref=cr.yandex/%s/linka-identity@%s\n' "$YC_REGISTRY_ID" "$digest" >> "$GITHUB_OUTPUT"
+      - name: Run schema from exact image digest
         env:
-          YC_LOCKBOX_SECRET_ID: ${{ secrets.YC_LOCKBOX_SECRET_ID }}
-          YC_LOCKBOX_SECRET_VERSION_ID: ${{ secrets.YC_LOCKBOX_SECRET_VERSION_ID }}
-          YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+          IMAGE_REF: ${{ steps.mirror.outputs.image_ref }}
+          YDB_ENDPOINT: ${{ vars.YDB_ENDPOINT }}
+          YDB_DATABASE: ${{ vars.YDB_DATABASE }}
         run: |
-          database_url="$("$HOME/yandex-cloud/bin/yc" lockbox payload get --id "$YC_LOCKBOX_SECRET_ID" --version-id "$YC_LOCKBOX_SECRET_VERSION_ID" --format json | jq -er '.entries[] | select(.key == "database_url") | .textValue')"
-          printf '::add-mask::%s\n' "$database_url"
-          DATABASE_URL="$database_url" docker run --rm --entrypoint /usr/local/bin/migrate \
-            -e DATABASE_URL "cr.yandex/$YC_REGISTRY_ID/linka-identity:$IMAGE_TAG"
+          docker run --rm --user 0:0 --entrypoint /usr/local/bin/schema \
+            --mount type=bind,source=/tmp/yc-key.json,target=/run/secrets/ydb-sa.json,readonly \
+            -e YDB_ENDPOINT \
+            -e YDB_DATABASE \
+            -e YDB_SERVICE_ACCOUNT_KEY_FILE_CREDENTIALS=/run/secrets/ydb-sa.json \
+            "$IMAGE_REF"
       - name: Deploy immutable revision with Lockbox references
         env:
-          YC_REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
+          IMAGE_REF: ${{ steps.mirror.outputs.image_ref }}
           YC_RUNTIME_SA_ID: ${{ secrets.YC_RUNTIME_SA_ID }}
           YC_LOCKBOX_SECRET_ID: ${{ secrets.YC_LOCKBOX_SECRET_ID }}
           YC_LOCKBOX_SECRET_VERSION_ID: ${{ secrets.YC_LOCKBOX_SECRET_VERSION_ID }}
@@ -84,11 +94,10 @@ jobs:
           trap 'rm -f /tmp/yc-key.json' EXIT
           "$HOME/yandex-cloud/bin/yc" serverless container revision deploy \
             --container-name linka-identity \
-            --image "cr.yandex/$YC_REGISTRY_ID/linka-identity:$IMAGE_TAG" \
+            --image "$IMAGE_REF" \
             --cores 1 --memory 512M --execution-timeout 30s --concurrency 16 \
             --service-account-id "$YC_RUNTIME_SA_ID" \
-            --environment "HTTP_ADDR=:8080,DEPLOYMENT_ENVIRONMENT=production,EMAIL_KEY_PROVIDER=yandex-kms,EMAIL_KEY_ACTIVE_ID=${{ vars.EMAIL_KEY_ACTIVE_ID }},BLIND_INDEX_CURRENT_VERSION=${{ vars.BLIND_INDEX_CURRENT_VERSION }},TOKEN_ACTIVE_KEY_ID=${{ vars.TOKEN_ACTIVE_KEY_ID }},TOKEN_ISSUER=${{ vars.TOKEN_ISSUER }},REQUIRE_OUTBOX_DELIVERY=true,OUTBOX_DELIVERY_URL=${{ vars.METRIC_PRIVACY_URL }}" \
-            --secret "environment-variable=DATABASE_URL,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=database_url" \
+            --environment "HTTP_ADDR=:8080,DEPLOYMENT_ENVIRONMENT=production,YDB_ENDPOINT=${{ vars.YDB_ENDPOINT }},YDB_DATABASE=${{ vars.YDB_DATABASE }},YDB_METADATA_CREDENTIALS=1,EMAIL_KEY_PROVIDER=yandex-kms,EMAIL_KEY_ACTIVE_ID=${{ vars.EMAIL_KEY_ACTIVE_ID }},BLIND_INDEX_CURRENT_VERSION=${{ vars.BLIND_INDEX_CURRENT_VERSION }},TOKEN_ACTIVE_KEY_ID=${{ vars.TOKEN_ACTIVE_KEY_ID }},TOKEN_ISSUER=${{ vars.TOKEN_ISSUER }},REQUIRE_OUTBOX_DELIVERY=true,OUTBOX_DELIVERY_URL=${{ vars.METRIC_PRIVACY_URL }}" \
             --secret "environment-variable=WORKLOADS_JSON,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=workloads_json" \
             --secret "environment-variable=PRODUCTS_JSON,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=products_json" \
             --secret "environment-variable=PAIRWISE_ID_KEY_BASE64,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=pairwise_id_key_base64" \
@@ -101,3 +110,6 @@ jobs:
         run: |
           curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 5 "$IDENTITY_PUBLIC_URL/readyz" | jq -e '.status == "ready"'
           curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 "$IDENTITY_PUBLIC_URL/.well-known/jwks.json" | jq -e '.keys | length >= 1'
+      - name: Remove deploy service-account key
+        if: always()
+        run: rm -f /tmp/yc-key.json

@@ -40,7 +40,7 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	database, err := store.Open(ctx, cfg.DatabaseURL, cfg.DatabaseMaxConnections)
+	database, err := store.Open(ctx, cfg.YDBEndpoint, cfg.YDBDatabase)
 	if err != nil {
 		return err
 	}

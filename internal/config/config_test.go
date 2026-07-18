@@ -8,8 +8,8 @@ import (
 
 func TestLoadRejectsMissingSecrets(t *testing.T) {
 	_, err := load(func(string) (string, bool) { return "", false })
-	if err == nil || !strings.Contains(err.Error(), "DATABASE_URL") {
-		t.Fatalf("expected missing DATABASE_URL error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "YDB_ENDPOINT") {
+		t.Fatalf("expected missing YDB_ENDPOINT error, got %v", err)
 	}
 }
 
@@ -48,7 +48,8 @@ func TestLoadRejectsLocalKEKAndOptionalOutboxInProduction(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	values := validValues(key)
 	values["DEPLOYMENT_ENVIRONMENT"] = "production"
-	values["DATABASE_URL"] = "postgres://identity@example.test/identity?sslmode=verify-full"
+	values["YDB_ENDPOINT"] = "grpcs://ydb.serverless.yandexcloud.net:2135"
+	values["YDB_METADATA_CREDENTIALS"] = "1"
 	if _, err := load(mapLookup(values)); err == nil || !strings.Contains(err.Error(), "local") {
 		t.Fatalf("production local KEK error = %v", err)
 	}
@@ -66,10 +67,30 @@ func TestLoadRejectsLocalKEKAndOptionalOutboxInProduction(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsServiceAccountKeyInProductionRuntime(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	values := validValues(key)
+	values["DEPLOYMENT_ENVIRONMENT"] = "production"
+	values["YDB_ENDPOINT"] = "grpcs://ydb.serverless.yandexcloud.net:2135"
+	values["YDB_METADATA_CREDENTIALS"] = "1"
+	values["YDB_SERVICE_ACCOUNT_KEY_FILE_CREDENTIALS"] = "/run/secrets/ydb.json"
+	values["EMAIL_KEY_PROVIDER"] = "yandex-kms"
+	delete(values, "EMAIL_LOCAL_KEKS_JSON")
+	values["EMAIL_KEY_ACTIVE_ID"] = "active"
+	values["EMAIL_YC_KMS_KEYS_JSON"] = `{"active":"kms-key-id"}`
+	values["REQUIRE_OUTBOX_DELIVERY"] = "true"
+	values["OUTBOX_DELIVERY_URL"] = "https://metric.example.test/v2/privacy/requests"
+
+	if _, err := load(mapLookup(values)); err == nil || !strings.Contains(err.Error(), "forbidden") {
+		t.Fatalf("production service-account-key error = %v", err)
+	}
+}
+
 func validValues(key string) map[string]string {
 	return map[string]string{
 		"DEPLOYMENT_ENVIRONMENT":      "development",
-		"DATABASE_URL":                "postgres://localhost/test",
+		"YDB_ENDPOINT":                "grpc://localhost:2136",
+		"YDB_DATABASE":                "/local",
 		"WORKLOADS_JSON":              `[{"id":"plays","token":"` + strings.Repeat("x", 32) + `","roles":["product"],"products":["linka-plays"]}]`,
 		"PRODUCTS_JSON":               `{"linka-plays":{"telemetry_audience":"linka-metric"}}`,
 		"PAIRWISE_ID_KEY_BASE64":      key,

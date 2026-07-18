@@ -1,4 +1,4 @@
-.PHONY: build test test-integration vet migrate run
+.PHONY: build test test-race test-integration vet schema run
 
 build:
 	go build ./...
@@ -6,14 +6,17 @@ build:
 test:
 	go test ./...
 
+test-race:
+	go test -race ./...
+
 test-integration:
 	go test -tags=integration ./...
 
 vet:
 	go vet ./...
 
-migrate:
-	go run ./cmd/migrate
+schema:
+	go run ./cmd/schema
 
 run:
 	go run ./cmd/identity

@@ -2,12 +2,14 @@ package store
 
 import (
 	"context"
-	"encoding/binary"
+	"errors"
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/linka-cloud/linka.identity/internal/cryptokit"
+	"github.com/linka-cloud/linka.identity/internal/domain"
+	"github.com/ydb-platform/ydb-go-sdk/v3"
+	"github.com/ydb-platform/ydb-go-sdk/v3/query"
 )
 
 type EmailIdentity struct {
@@ -18,164 +20,343 @@ type EmailIdentity struct {
 }
 
 type NewEmailIdentity struct {
-	ID                string
-	PersonID          string
-	ProductID         string
-	Namespace         string
-	LinkageScope      string
-	ScopeKey          string
-	BlindIndexVersion int
-	BlindIndex        []byte
-	EncryptedEmail    cryptokit.Ciphertext
-	VerifiedAt        time.Time
+	ID                   string
+	PersonID             string
+	AccountID            string
+	ProductID            string
+	Namespace            string
+	LinkageScope         string
+	ScopeKey             string
+	BlindIndexVersion    int
+	BlindIndex           []byte
+	EncryptedEmail       cryptokit.Ciphertext
+	AgeCategory          string
+	GuardianRelationship *string
+	VerifiedAt           time.Time
+	CreateAccount        bool
+	InstallationID       *string
 }
 
-func LockBlindIndex(ctx context.Context, tx pgx.Tx, value []byte) error {
-	if len(value) < 8 {
-		return fmt.Errorf("blind index is too short")
-	}
-	key := int64(binary.BigEndian.Uint64(value[:8]))
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", key); err != nil {
-		return fmt.Errorf("lock blind index: %w", err)
-	}
-	return nil
-}
-
-func FindEmailIdentity(ctx context.Context, tx pgx.Tx, namespace, linkageScope, scopeKey string, indexes []cryptokit.BlindIndex) (EmailIdentity, error) {
-	versions := make([]int16, 0, len(indexes))
-	values := make([][]byte, 0, len(indexes))
-	for _, index := range indexes {
-		versions = append(versions, int16(index.Version))
-		values = append(values, index.Value)
-	}
+func (s *Store) RegisterEmailIdentity(ctx context.Context, identity NewEmailIdentity, indexes []cryptokit.BlindIndex) (EmailIdentity, bool, error) {
 	var result EmailIdentity
-	err := tx.QueryRow(ctx, `
-		SELECT identity.id::text, identity.person_id::text, COALESCE(account.id::text, ''), wanted.version
-		FROM email_identities identity
-		JOIN email_identity_blind_indexes blind ON blind.identity_id = identity.id
-		JOIN unnest($4::smallint[], $5::bytea[]) AS wanted(version, value)
-		  ON wanted.version = blind.blind_index_version
-		 AND wanted.value = blind.email_blind_index
-		LEFT JOIN accounts account ON account.person_id = identity.person_id AND account.status = 'active'
-		WHERE identity.identity_namespace = $1
-		  AND identity.linkage_scope = $2
-		  AND identity.scope_key = $3
-		LIMIT 1`, namespace, linkageScope, scopeKey, versions, values).Scan(
-		&result.IdentityID, &result.PersonID, &result.AccountID, &result.MatchedBlindIndexVersion)
+	var created bool
+	err := s.serializable(ctx, func(ctx context.Context, tx query.TxActor) error {
+		result = EmailIdentity{}
+		created = false
+
+		for _, index := range indexes {
+			row, err := tx.QueryRow(ctx, `
+				DECLARE $namespace AS Utf8;
+				DECLARE $linkage_scope AS Utf8;
+				DECLARE $scope_key AS Utf8;
+				DECLARE $index_version AS Uint64;
+				DECLARE $blind_index AS Bytes;
+				SELECT identity_id FROM email_blind_indexes
+				WHERE identity_namespace = $namespace AND linkage_scope = $linkage_scope
+				  AND scope_key = $scope_key AND blind_index_version = $index_version
+				  AND email_blind_index = $blind_index;`,
+				query.WithParameters(ydb.ParamsBuilder().
+					Param("$namespace").Text(identity.Namespace).
+					Param("$linkage_scope").Text(identity.LinkageScope).
+					Param("$scope_key").Text(identity.ScopeKey).
+					Param("$index_version").Uint64(uint64(index.Version)).
+					Param("$blind_index").Bytes(index.Value).
+					Build()))
+			if errors.Is(err, query.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if err := row.Scan(&result.IdentityID); err != nil {
+				return err
+			}
+			result.MatchedBlindIndexVersion = index.Version
+			break
+		}
+
+		if result.IdentityID != "" {
+			row, err := tx.QueryRow(ctx, `
+				DECLARE $id AS Utf8;
+				SELECT person_id FROM email_identities WHERE id = $id;`,
+				query.WithParameters(ydb.ParamsBuilder().Param("$id").Text(result.IdentityID).Build()))
+			if err != nil {
+				return err
+			}
+			if err := row.Scan(&result.PersonID); err != nil {
+				return err
+			}
+			accountID, err := findAccountByPerson(ctx, tx, result.PersonID)
+			if err != nil && !errors.Is(err, query.ErrNoRows) {
+				return err
+			}
+			result.AccountID = accountID
+			if result.MatchedBlindIndexVersion != identity.BlindIndexVersion {
+				if err := insertBlindIndex(ctx, tx, identity, result.IdentityID); err != nil {
+					return err
+				}
+			}
+			if identity.CreateAccount && result.AccountID == "" {
+				if err := insertAccount(ctx, tx, identity.AccountID, result.PersonID, s.now().UTC()); err != nil {
+					return err
+				}
+				result.AccountID = identity.AccountID
+			}
+			if identity.InstallationID != nil {
+				if err := linkInstallation(ctx, tx, *identity.InstallationID, identity.ProductID, result.PersonID, s.now().UTC()); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+
+		now := s.now().UTC()
+		if err := tx.Exec(ctx, `
+			DECLARE $id AS Utf8;
+			DECLARE $age_category AS Utf8;
+			DECLARE $guardian_relationship AS Utf8?;
+			DECLARE $now AS Timestamp;
+			INSERT INTO persons (id, age_category, guardian_relationship, created_at, version)
+			VALUES ($id, $age_category, $guardian_relationship, $now, 1u);`,
+			query.WithParameters(ydb.ParamsBuilder().
+				Param("$id").Text(identity.PersonID).
+				Param("$age_category").Text(identity.AgeCategory).
+				Param("$guardian_relationship").Any(nullableText(identity.GuardianRelationship)).
+				Param("$now").Timestamp(now).
+				Build())); err != nil {
+			return err
+		}
+		if err := tx.Exec(ctx, `
+			DECLARE $id AS Utf8;
+			DECLARE $person_id AS Utf8;
+			DECLARE $product_id AS Utf8;
+			DECLARE $namespace AS Utf8;
+			DECLARE $linkage_scope AS Utf8;
+			DECLARE $scope_key AS Utf8;
+			DECLARE $encrypted_email AS Bytes;
+			DECLARE $email_nonce AS Bytes;
+			DECLARE $wrapped_data_key AS Bytes;
+			DECLARE $key_id AS Utf8;
+			DECLARE $algorithm AS Utf8;
+			DECLARE $verified_at AS Timestamp;
+			DECLARE $now AS Timestamp;
+			INSERT INTO email_identities (
+				id, person_id, product_id, identity_namespace, linkage_scope, scope_key,
+				encrypted_email, email_nonce, wrapped_data_key, key_id, encryption_algorithm,
+				verified_at, created_at, version
+			) VALUES (
+				$id, $person_id, $product_id, $namespace, $linkage_scope, $scope_key,
+				$encrypted_email, $email_nonce, $wrapped_data_key, $key_id, $algorithm,
+				$verified_at, $now, 1u
+			);`, query.WithParameters(ydb.ParamsBuilder().
+			Param("$id").Text(identity.ID).
+			Param("$person_id").Text(identity.PersonID).
+			Param("$product_id").Text(identity.ProductID).
+			Param("$namespace").Text(identity.Namespace).
+			Param("$linkage_scope").Text(identity.LinkageScope).
+			Param("$scope_key").Text(identity.ScopeKey).
+			Param("$encrypted_email").Bytes(identity.EncryptedEmail.Data).
+			Param("$email_nonce").Bytes(identity.EncryptedEmail.Nonce).
+			Param("$wrapped_data_key").Bytes(identity.EncryptedEmail.WrappedDataKey).
+			Param("$key_id").Text(identity.EncryptedEmail.KeyID).
+			Param("$algorithm").Text(identity.EncryptedEmail.Algorithm).
+			Param("$verified_at").Timestamp(identity.VerifiedAt.UTC()).
+			Param("$now").Timestamp(now).
+			Build())); err != nil {
+			return err
+		}
+		if err := insertBlindIndex(ctx, tx, identity, identity.ID); err != nil {
+			return err
+		}
+		if identity.CreateAccount {
+			if err := insertAccount(ctx, tx, identity.AccountID, identity.PersonID, now); err != nil {
+				return err
+			}
+			result.AccountID = identity.AccountID
+		}
+		if identity.InstallationID != nil {
+			if err := linkInstallation(ctx, tx, *identity.InstallationID, identity.ProductID, identity.PersonID, now); err != nil {
+				return err
+			}
+		}
+		result.IdentityID = identity.ID
+		result.PersonID = identity.PersonID
+		result.MatchedBlindIndexVersion = identity.BlindIndexVersion
+		created = true
+		return nil
+	})
 	if err != nil {
-		return EmailIdentity{}, err
+		return EmailIdentity{}, false, err
 	}
-	return result, nil
+	return result, created, nil
 }
 
-func InsertPerson(ctx context.Context, tx pgx.Tx, id, ageCategory string, guardianRelationship *string) error {
-	_, err := tx.Exec(ctx, `
-		INSERT INTO persons (id, age_category, guardian_relationship)
-		VALUES ($1, $2, $3)`, id, ageCategory, guardianRelationship)
-	return err
+func insertBlindIndex(ctx context.Context, tx query.TxActor, identity NewEmailIdentity, identityID string) error {
+	return tx.Exec(ctx, `
+		DECLARE $namespace AS Utf8;
+		DECLARE $linkage_scope AS Utf8;
+		DECLARE $scope_key AS Utf8;
+		DECLARE $index_version AS Uint64;
+		DECLARE $blind_index AS Bytes;
+		DECLARE $identity_id AS Utf8;
+		DECLARE $now AS Timestamp;
+		INSERT INTO email_blind_indexes (
+			identity_namespace, linkage_scope, scope_key, blind_index_version,
+			email_blind_index, identity_id, created_at
+		) VALUES ($namespace, $linkage_scope, $scope_key, $index_version, $blind_index, $identity_id, $now);`,
+		query.WithParameters(ydb.ParamsBuilder().
+			Param("$namespace").Text(identity.Namespace).
+			Param("$linkage_scope").Text(identity.LinkageScope).
+			Param("$scope_key").Text(identity.ScopeKey).
+			Param("$index_version").Uint64(uint64(identity.BlindIndexVersion)).
+			Param("$blind_index").Bytes(identity.BlindIndex).
+			Param("$identity_id").Text(identityID).
+			Param("$now").Timestamp(time.Now().UTC()).
+			Build()))
 }
 
-func InsertEmailIdentity(ctx context.Context, tx pgx.Tx, identity NewEmailIdentity) error {
-	_, err := tx.Exec(ctx, `
-		INSERT INTO email_identities (
-			id, person_id, product_id, identity_namespace, linkage_scope, scope_key,
-			blind_index_version, email_blind_index, encrypted_email, email_nonce,
-			wrapped_data_key, key_id, encryption_algorithm, verified_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
-		identity.ID, identity.PersonID, identity.ProductID, identity.Namespace,
-		identity.LinkageScope, identity.ScopeKey, identity.BlindIndexVersion,
-		identity.BlindIndex, identity.EncryptedEmail.Data, identity.EncryptedEmail.Nonce,
-		identity.EncryptedEmail.WrappedDataKey, identity.EncryptedEmail.KeyID,
-		identity.EncryptedEmail.Algorithm, identity.VerifiedAt)
+func findAccountByPerson(ctx context.Context, executor query.Executor, personID string) (string, error) {
+	row, err := executor.QueryRow(ctx, `
+		DECLARE $person_id AS Utf8;
+		SELECT account_id FROM accounts_by_person WHERE person_id = $person_id;`,
+		query.WithParameters(ydb.ParamsBuilder().Param("$person_id").Text(personID).Build()))
 	if err != nil {
+		return "", err
+	}
+	var id string
+	return id, row.Scan(&id)
+}
+
+func insertAccount(ctx context.Context, tx query.TxActor, id, personID string, now time.Time) error {
+	if id == "" {
+		return errors.New("account ID is required")
+	}
+	return tx.Exec(ctx, `
+		DECLARE $id AS Utf8;
+		DECLARE $person_id AS Utf8;
+		DECLARE $now AS Timestamp;
+		INSERT INTO accounts (id, person_id, status, created_at, version)
+		VALUES ($id, $person_id, "active", $now, 1u);
+		INSERT INTO accounts_by_person (person_id, account_id) VALUES ($person_id, $id);`,
+		query.WithParameters(ydb.ParamsBuilder().
+			Param("$id").Text(id).
+			Param("$person_id").Text(personID).
+			Param("$now").Timestamp(now).
+			Build()))
+}
+
+func linkInstallation(ctx context.Context, tx query.TxActor, installationID, productID, personID string, now time.Time) error {
+	row, err := tx.QueryRow(ctx, `
+		DECLARE $id AS Utf8;
+		SELECT product_id, person_id, disabled_at, version
+		FROM product_installations WHERE id = $id;`,
+		query.WithParameters(ydb.ParamsBuilder().Param("$id").Text(installationID).Build()))
+	if err != nil {
+		return noRows(err)
+	}
+	var storedProduct string
+	var storedPerson *string
+	var disabledAt *time.Time
+	var version uint64
+	if err := row.Scan(&storedProduct, &storedPerson, &disabledAt, &version); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `
-		INSERT INTO email_identity_blind_indexes (identity_id, blind_index_version, email_blind_index)
-		VALUES ($1, $2, $3)`, identity.ID, identity.BlindIndexVersion, identity.BlindIndex)
-	return err
+	if storedProduct != productID || disabledAt != nil || (storedPerson != nil && *storedPerson != personID) {
+		return domain.ErrConflict
+	}
+	updated, err := tx.QueryRow(ctx, `
+		DECLARE $id AS Utf8;
+		DECLARE $person_id AS Utf8;
+		DECLARE $now AS Timestamp;
+		DECLARE $version AS Uint64;
+		UPDATE product_installations
+		SET person_id = $person_id, last_seen_at = $now, version = version + 1u
+		WHERE id = $id AND version = $version
+		RETURNING version;`, query.WithParameters(ydb.ParamsBuilder().
+		Param("$id").Text(installationID).
+		Param("$person_id").Text(personID).
+		Param("$now").Timestamp(now).
+		Param("$version").Uint64(version).
+		Build()))
+	if err != nil {
+		return optimistic(err)
+	}
+	var nextVersion uint64
+	if err := updated.Scan(&nextVersion); err != nil || nextVersion != version+1 {
+		return domain.ErrConflict
+	}
+	return tx.Exec(ctx, `
+		DECLARE $installation_id AS Utf8;
+		DECLARE $person_id AS Utf8;
+		UPDATE subject_aliases SET person_id = $person_id
+		WHERE subject_type = "installation" AND subject_id = $installation_id;`,
+		query.WithParameters(ydb.ParamsBuilder().
+			Param("$installation_id").Text(installationID).
+			Param("$person_id").Text(personID).
+			Build()))
 }
 
-func UpsertEmailBlindIndex(ctx context.Context, tx pgx.Tx, identityID string, index cryptokit.BlindIndex) error {
-	_, err := tx.Exec(ctx, `
-		INSERT INTO email_identity_blind_indexes (identity_id, blind_index_version, email_blind_index)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (identity_id, blind_index_version) DO UPDATE
-		SET email_blind_index = EXCLUDED.email_blind_index
-		WHERE email_identity_blind_indexes.email_blind_index = EXCLUDED.email_blind_index`,
-		identityID, index.Version, index.Value)
-	return err
-}
-
-func MarkEmailIdentityVerified(ctx context.Context, tx pgx.Tx, identityID string, verifiedAt time.Time) error {
-	_, err := tx.Exec(ctx, `UPDATE email_identities SET verified_at = COALESCE(verified_at, $2) WHERE id = $1`, identityID, verifiedAt)
+func optimistic(err error) error {
+	if errors.Is(err, query.ErrNoRows) {
+		return domain.ErrConflict
+	}
 	return err
 }
 
 func (s *Store) ValidateBlindIndexVersions(ctx context.Context, configured map[int][]byte) error {
-	rows, err := s.pool.Query(ctx, `
-		SELECT DISTINCT blind_index_version FROM email_identity_blind_indexes
-		UNION
-		SELECT DISTINCT blind_index_version FROM email_verifications WHERE consumed_at IS NULL`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var version int
-		if err := rows.Scan(&version); err != nil {
+	for _, statement := range []string{
+		`SELECT blind_index_version FROM email_blind_indexes;`,
+		`SELECT blind_index_version FROM email_verifications;`,
+	} {
+		rows, err := s.client.QueryResultSet(ctx, statement, query.WithTxControl(query.SnapshotReadOnlyTxControl()))
+		if err != nil {
 			return err
 		}
-		if _, ok := configured[version]; !ok {
-			return fmt.Errorf("blind-index key version %d is still referenced by persisted rows", version)
+		for row, rowErr := range rows.Rows(ctx) {
+			if rowErr != nil {
+				_ = rows.Close(ctx)
+				return rowErr
+			}
+			var version uint64
+			if err := row.Scan(&version); err != nil {
+				_ = rows.Close(ctx)
+				return err
+			}
+			if _, ok := configured[int(version)]; !ok {
+				_ = rows.Close(ctx)
+				return fmt.Errorf("blind-index key version %d is still referenced by persisted rows", version)
+			}
 		}
+		_ = rows.Close(ctx)
 	}
-	return rows.Err()
+	return nil
 }
 
 func (s *Store) ValidateEnvelopeKeyIDs(ctx context.Context, configured map[string]struct{}) error {
-	rows, err := s.pool.Query(ctx, `
-		SELECT DISTINCT key_id FROM email_identities
-		UNION
-		SELECT DISTINCT key_id FROM email_verifications`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var keyID string
-		if err := rows.Scan(&keyID); err != nil {
+	for _, statement := range []string{
+		`SELECT key_id FROM email_identities;`,
+		`SELECT key_id FROM email_verifications;`,
+	} {
+		rows, err := s.client.QueryResultSet(ctx, statement, query.WithTxControl(query.SnapshotReadOnlyTxControl()))
+		if err != nil {
 			return err
 		}
-		if _, ok := configured[keyID]; !ok {
-			return fmt.Errorf("envelope key alias %q is still referenced by persisted rows", keyID)
+		for row, rowErr := range rows.Rows(ctx) {
+			if rowErr != nil {
+				_ = rows.Close(ctx)
+				return rowErr
+			}
+			var keyID string
+			if err := row.Scan(&keyID); err != nil {
+				_ = rows.Close(ctx)
+				return err
+			}
+			if _, ok := configured[keyID]; !ok {
+				_ = rows.Close(ctx)
+				return fmt.Errorf("envelope key alias %q is still referenced by persisted rows", keyID)
+			}
 		}
-	}
-	return rows.Err()
-}
-
-func EnsureAccount(ctx context.Context, tx pgx.Tx, id, personID string) (string, error) {
-	var accountID string
-	err := tx.QueryRow(ctx, `
-		INSERT INTO accounts (id, person_id, status)
-		VALUES ($1, $2, 'active')
-		ON CONFLICT (person_id) DO UPDATE SET person_id = EXCLUDED.person_id
-		WHERE accounts.status = 'active'
-		RETURNING id::text`, id, personID).Scan(&accountID)
-	return accountID, err
-}
-
-func LinkInstallation(ctx context.Context, tx pgx.Tx, installationID, productID, personID string) error {
-	tag, err := tx.Exec(ctx, `
-		UPDATE product_installations
-		SET person_id = $3, last_seen_at = now()
-		WHERE id = $1 AND product_id = $2 AND disabled_at IS NULL
-		  AND (person_id IS NULL OR person_id = $3)`, installationID, productID, personID)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() != 1 {
-		return pgx.ErrNoRows
+		_ = rows.Close(ctx)
 	}
 	return nil
 }

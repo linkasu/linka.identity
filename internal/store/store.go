@@ -4,65 +4,96 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/linka-cloud/linka.identity/internal/migrations"
+	"github.com/linka-cloud/linka.identity/internal/domain"
+	"github.com/linka-cloud/linka.identity/internal/schema"
+	"github.com/ydb-platform/ydb-go-sdk-auth-environ"
+	"github.com/ydb-platform/ydb-go-sdk/v3"
+	"github.com/ydb-platform/ydb-go-sdk/v3/query"
+	"github.com/ydb-platform/ydb-go-sdk/v3/types"
+	yc "github.com/ydb-platform/ydb-go-yc"
 )
 
 type Store struct {
-	pool *pgxpool.Pool
+	driver *ydb.Driver
+	client query.Client
+	now    func() time.Time
 }
 
-func Open(ctx context.Context, databaseURL string, maxConnections int32) (*Store, error) {
-	config, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		return nil, errorsWithoutDSN("parse database configuration", err)
+func Open(ctx context.Context, endpoint, database string) (*Store, error) {
+	if strings.TrimSpace(endpoint) == "" || !strings.HasPrefix(database, "/") {
+		return nil, errors.New("invalid YDB endpoint or database path")
 	}
-	config.MaxConns = maxConnections
-	pool, err := pgxpool.NewWithConfig(ctx, config)
+	dsn := strings.TrimRight(endpoint, "/") + database
+	driver, err := ydb.Open(ctx, dsn, environ.WithEnvironCredentials(), yc.WithInternalCA())
 	if err != nil {
-		return nil, errorsWithoutDSN("create database pool", err)
+		return nil, fmt.Errorf("open YDB failed (%T)", err)
 	}
-	return &Store{pool: pool}, nil
+	return &Store{driver: driver, client: driver.Query(), now: time.Now}, nil
 }
 
-func New(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+func New(driver *ydb.Driver) *Store {
+	return &Store{driver: driver, client: driver.Query(), now: time.Now}
 }
 
-func (s *Store) Pool() *pgxpool.Pool {
-	return s.pool
-}
-
-func (s *Store) Begin(ctx context.Context) (pgx.Tx, error) {
-	return s.pool.Begin(ctx)
+func (s *Store) Client() query.Client {
+	return s.client
 }
 
 func (s *Store) Ping(ctx context.Context) error {
-	return s.pool.Ping(ctx)
+	row, err := s.client.QueryRow(ctx, `SELECT 1u AS value;`, query.WithTxControl(query.SnapshotReadOnlyTxControl()))
+	if err != nil {
+		return err
+	}
+	var value uint32
+	return row.Scan(&value)
 }
 
 func (s *Store) Ready(ctx context.Context) error {
-	if err := s.pool.Ping(ctx); err != nil {
+	row, err := s.client.QueryRow(ctx, `
+		DECLARE $name AS Utf8;
+		SELECT version FROM schema_meta WHERE name = $name;`,
+		query.WithParameters(ydb.ParamsBuilder().Param("$name").Text("identity").Build()),
+		query.WithTxControl(query.SnapshotReadOnlyTxControl()))
+	if err != nil {
 		return err
 	}
-	var applied bool
-	if err := s.pool.QueryRow(ctx, `
-		SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)`, migrations.Current).Scan(&applied); err != nil {
+	var version uint64
+	if err := row.Scan(&version); err != nil {
 		return err
 	}
-	if !applied {
-		return errors.New("current database migration is not applied")
+	if version != schema.Version {
+		return fmt.Errorf("YDB schema version is %d, expected %d", version, schema.Version)
 	}
 	return nil
 }
 
 func (s *Store) Close() {
-	s.pool.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = s.driver.Close(ctx)
 }
 
-// pgx parse errors can echo a DSN. Startup errors should never expose credentials.
-func errorsWithoutDSN(operation string, err error) error {
-	return fmt.Errorf("%s failed (%T)", operation, err)
+func (s *Store) serializable(ctx context.Context, operation query.TxOperation) error {
+	return s.client.DoTx(ctx, operation,
+		query.WithTxSettings(query.TxSettings(query.WithSerializableReadWrite())),
+		query.WithIdempotent(),
+	)
+}
+
+func noRows(err error) error {
+	if errors.Is(err, query.ErrNoRows) {
+		return domain.ErrNotFound
+	}
+	return err
+}
+
+func nullableText(value *string) types.Value {
+	return types.NullableUTF8Value(value)
+}
+
+func nullableTimestamp(value *time.Time) types.Value {
+	return types.NullableTimestampValueFromTime(value)
 }
