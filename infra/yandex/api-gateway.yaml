@@ -3,6 +3,15 @@ info:
   title: linka-identity
   version: 1.0.0
 paths:
+  /internal/workers/tick:
+    x-yc-apigateway-any-method:
+      x-yc-apigateway-integration:
+        type: dummy
+        http_code: 404
+        http_headers:
+          Content-Type: application/json
+        content:
+          '*': '{"status":"not_found"}'
   /:
     x-yc-apigateway-any-method:
       x-yc-apigateway-integration:

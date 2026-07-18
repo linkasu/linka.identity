@@ -38,6 +38,12 @@ Lockbox stores workload credentials, product registry, pairwise HMAC key, blind-
 
 No `DATABASE_URL`, PostgreSQL migration, mutable deployment tag, VPC connector, or service-account-key JSON exists in the runtime revision.
 
+## Serverless worker scheduling
+
+Background goroutines are best-effort only in a Serverless Container and are not the guarantee for outbox delivery, privacy erasure, or expired-verification cleanup. Configure a Yandex Cloud timer trigger to invoke `POST /internal/workers/tick` on the direct container endpoint every minute. Use a separate service account with only the `serverless-containers.containerInvoker` role; do not use an application token for this endpoint.
+
+The API Gateway exact path `/internal/workers/tick` must remain a dummy `404` integration so that the public greedy route cannot reach the worker tick. Direct container IAM invocation is the endpoint's authentication boundary.
+
 ## Gateway limits
 
 Do not expose the raw Serverless Container invocation endpoint. Route through the approved gateway/SWS control and enforce at minimum:

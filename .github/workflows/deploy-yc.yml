@@ -91,7 +91,6 @@ jobs:
           YC_LOCKBOX_SECRET_ID: ${{ secrets.YC_LOCKBOX_SECRET_ID }}
           YC_LOCKBOX_SECRET_VERSION_ID: ${{ secrets.YC_LOCKBOX_SECRET_VERSION_ID }}
         run: |
-          trap 'rm -f /tmp/yc-key.json' EXIT
           "$HOME/yandex-cloud/bin/yc" serverless container revision deploy \
             --container-name linka-identity \
             --image "$IMAGE_REF" \
@@ -104,6 +103,22 @@ jobs:
             --secret "environment-variable=EMAIL_YC_KMS_KEYS_JSON,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=email_yc_kms_keys_json" \
             --secret "environment-variable=BLIND_INDEX_KEYS_JSON,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=blind_index_keys_json" \
             --secret "environment-variable=TOKEN_SIGNING_KEYS_JSON,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=token_signing_keys_json"
+      - name: Drain required workers through direct IAM invocation
+        run: |
+          container_url="$("$HOME/yandex-cloud/bin/yc" serverless container get \
+            --name linka-identity --format json | jq -er .url)"
+          iam_token="$("$HOME/yandex-cloud/bin/yc" iam create-token)"
+          for attempt in $(seq 1 8); do
+            curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 2 \
+              --request POST "$container_url/internal/workers/tick" \
+              --header "Authorization: Bearer $iam_token" | jq -e '.status == "ok"'
+            if curl --silent --show-error "${{ vars.IDENTITY_PUBLIC_URL }}/readyz" | jq -e '.status == "ready"'; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Identity workers did not restore readiness"
+          exit 1
       - name: Production readiness and JWKS smoke
         env:
           IDENTITY_PUBLIC_URL: ${{ vars.IDENTITY_PUBLIC_URL }}

@@ -22,6 +22,7 @@ import (
 	"github.com/linka-cloud/linka.identity/internal/store"
 	"github.com/linka-cloud/linka.identity/internal/token"
 	"github.com/linka-cloud/linka.identity/internal/verificationworker"
+	"github.com/linka-cloud/linka.identity/internal/workertick"
 )
 
 func main() {
@@ -99,8 +100,14 @@ func run(logger *slog.Logger) error {
 		products[productID] = product.TelemetryAudience
 	}
 	identityService := service.NewIdentityServiceWithVerification(database, envelope, indexer, cfg.MinorCrossProductLinking, cfg.EmailVerificationTTL)
-	handler := httpapi.New(database, identityService, tokenSigner, authenticator, pairwiseIDs, products,
+	outboxWorker := outbox.New(database, cfg.OutboxURL, tokenSigner, products, cfg.OutboxPollInterval, cfg.OutboxMaxAttempts, logger)
+	privacyWorker := privacyworker.New(database, cfg.OutboxPollInterval, cfg.OutboxMaxAttempts, logger)
+	verificationWorker := verificationworker.New(database, cfg.EmailCleanupInterval, logger)
+	apiHandler := httpapi.New(database, identityService, tokenSigner, authenticator, pairwiseIDs, products,
 		cfg.RequireOutboxDelivery, cfg.OutboxReadinessMaxAge, logger)
+	handler := http.NewServeMux()
+	handler.Handle(workertick.Path, workertick.New(outboxWorker, privacyWorker, verificationWorker))
+	handler.Handle("/", apiHandler)
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,
@@ -113,9 +120,9 @@ func run(logger *slog.Logger) error {
 
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	defer cancelWorker()
-	go outbox.New(database, cfg.OutboxURL, tokenSigner, products, cfg.OutboxPollInterval, cfg.OutboxMaxAttempts, logger).Run(workerCtx)
-	go privacyworker.New(database, cfg.OutboxPollInterval, cfg.OutboxMaxAttempts, logger).Run(workerCtx)
-	go verificationworker.New(database, cfg.EmailCleanupInterval, logger).Run(workerCtx)
+	go outboxWorker.Run(workerCtx)
+	go privacyWorker.Run(workerCtx)
+	go verificationWorker.Run(workerCtx)
 
 	serverErrors := make(chan error, 1)
 	go func() {

@@ -23,13 +23,19 @@ func (w *Worker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 	for {
-		if _, err := w.store.DeleteExpiredEmailVerifications(ctx, time.Now().UTC(), 100); err != nil && !errors.Is(err, context.Canceled) {
-			w.logger.Error("expired email verification cleanup failed")
-		}
+		_ = w.Process(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
 	}
+}
+
+func (w *Worker) Process(ctx context.Context) error {
+	_, err := w.store.DeleteExpiredEmailVerifications(ctx, time.Now().UTC(), 100)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		w.logger.Error("expired email verification cleanup failed")
+	}
+	return err
 }

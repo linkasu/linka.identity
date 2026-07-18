@@ -47,7 +47,7 @@ func (w *Worker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 	for {
-		w.process(ctx)
+		_ = w.Process(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -56,33 +56,46 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-func (w *Worker) process(ctx context.Context) {
+func (w *Worker) Process(ctx context.Context) error {
+	if w.url == "" {
+		return nil
+	}
 	events, err := w.store.ClaimOutbox(ctx, 20)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
 			w.logger.Error("outbox claim failed", "error_type", fmt.Sprintf("%T", err))
 		}
-		return
+		return err
 	}
 	for _, event := range events {
 		receipt, err := w.deliver(ctx, event)
 		if errors.Is(err, errDeliveryPending) {
-			if retryErr := w.store.RescheduleOutbox(ctx, event.ID, retryDelay(event.PollCount+1)); retryErr != nil && !errors.Is(retryErr, context.Canceled) {
-				w.logger.Error("outbox polling reschedule failed", "event_id", event.ID)
+			if retryErr := w.store.RescheduleOutbox(ctx, event.ID, retryDelay(event.PollCount+1)); retryErr != nil {
+				if !errors.Is(retryErr, context.Canceled) {
+					w.logger.Error("outbox polling reschedule failed", "error_type", fmt.Sprintf("%T", retryErr))
+				}
+				return retryErr
 			}
 			continue
 		}
 		if err != nil {
 			delay := retryDelay(event.Attempt + 1)
-			if retryErr := w.store.RetryOutbox(ctx, event.ID, "delivery failed", delay, w.maxAttempts); retryErr != nil && !errors.Is(retryErr, context.Canceled) {
-				w.logger.Error("outbox retry scheduling failed", "event_id", event.ID)
+			if retryErr := w.store.RetryOutbox(ctx, event.ID, "delivery failed", delay, w.maxAttempts); retryErr != nil {
+				if !errors.Is(retryErr, context.Canceled) {
+					w.logger.Error("outbox retry scheduling failed", "error_type", fmt.Sprintf("%T", retryErr))
+				}
+				return retryErr
 			}
 			continue
 		}
-		if err := w.store.MarkOutboxDelivered(ctx, event.ID, receipt); err != nil && !errors.Is(err, context.Canceled) {
-			w.logger.Error("outbox completion failed", "event_id", event.ID)
+		if err := w.store.MarkOutboxDelivered(ctx, event.ID, receipt); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				w.logger.Error("outbox completion failed", "error_type", fmt.Sprintf("%T", err))
+			}
+			return err
 		}
 	}
+	return nil
 }
 
 func (w *Worker) deliver(ctx context.Context, event store.OutboxEvent) (json.RawMessage, error) {

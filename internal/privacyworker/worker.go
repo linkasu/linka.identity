@@ -25,7 +25,7 @@ func (w *Worker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 	for {
-		w.process(ctx)
+		_ = w.Process(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -34,22 +34,26 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-func (w *Worker) process(ctx context.Context) {
+func (w *Worker) Process(ctx context.Context) error {
 	jobs, err := w.store.ClaimPrivacyErasures(ctx, 10)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
 			w.logger.Error("privacy erasure claim failed", "error_type", fmt.Sprintf("%T", err))
 		}
-		return
+		return err
 	}
 	for _, job := range jobs {
 		if err := w.store.ErasePrivacyJob(ctx, job); err != nil {
 			delay := retryDelay(job.Attempts)
-			if retryErr := w.store.RetryPrivacyErasure(ctx, job, delay, w.maxAttempts); retryErr != nil && !errors.Is(retryErr, context.Canceled) {
-				w.logger.Error("privacy erasure retry failed", "request_id", job.RequestID)
+			if retryErr := w.store.RetryPrivacyErasure(ctx, job, delay, w.maxAttempts); retryErr != nil {
+				if !errors.Is(retryErr, context.Canceled) {
+					w.logger.Error("privacy erasure retry failed", "error_type", fmt.Sprintf("%T", retryErr))
+				}
+				return retryErr
 			}
 		}
 	}
+	return nil
 }
 
 func retryDelay(attempt int) time.Duration {
