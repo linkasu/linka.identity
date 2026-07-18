@@ -58,7 +58,12 @@ func run(logger *slog.Logger) error {
 	case "local":
 		keyProvider, err = cryptokit.NewLocalAESKeyring(cfg.EmailKeyActiveID, cfg.EmailLocalKEKs)
 	case "yandex-kms":
-		keyProvider, err = cryptokit.NewYandexKMSKeyring(cfg.EmailKeyActiveID, cfg.EmailYandexKMSKeys, cryptokit.NewMetadataIAMTokenSource())
+		var kmsKeyring *cryptokit.YandexKMSKeyring
+		kmsKeyring, err = cryptokit.NewYandexKMSKeyring(cfg.EmailKeyActiveID, cfg.EmailYandexKMSKeys, cryptokit.NewMetadataIAMTokenSource())
+		if err == nil {
+			defer kmsKeyring.Close()
+			keyProvider = kmsKeyring
+		}
 	default:
 		err = errors.New("unsupported email key provider")
 	}

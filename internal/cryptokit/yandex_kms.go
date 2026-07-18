@@ -1,22 +1,26 @@
 package cryptokit
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/base64"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
+
+	kms "github.com/yandex-cloud/go-genproto/yandex/cloud/kms/v1"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 )
 
-const yandexKMSEndpoint = "https://kms.api.cloud.yandex.net"
+// Crypto RPCs use a separate discovered endpoint from KMS key management.
+const yandexKMSEndpoint = "kms.yandex:443"
 const yandexMetadataTokenURL = "http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token"
 
 type IAMTokenSource interface {
@@ -73,21 +77,32 @@ type YandexKMSKeyring struct {
 	activeKeyID string
 	keys        map[string]string
 	tokens      IAMTokenSource
-	client      *http.Client
-	endpoint    string
+	client      symmetricCryptoClient
+	connection  *grpc.ClientConn
+}
+
+type symmetricCryptoClient interface {
+	Encrypt(context.Context, *kms.SymmetricEncryptRequest, ...grpc.CallOption) (*kms.SymmetricEncryptResponse, error)
+	Decrypt(context.Context, *kms.SymmetricDecryptRequest, ...grpc.CallOption) (*kms.SymmetricDecryptResponse, error)
 }
 
 func NewYandexKMSKeyring(activeKeyID string, keys map[string]string, tokens IAMTokenSource) (*YandexKMSKeyring, error) {
-	return newYandexKMSKeyring(activeKeyID, keys, tokens, yandexKMSEndpoint, false)
+	connection, err := grpc.NewClient(yandexKMSEndpoint, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})))
+	if err != nil {
+		return nil, fmt.Errorf("connect to Yandex KMS: %w", err)
+	}
+	provider, err := newYandexKMSKeyring(activeKeyID, keys, tokens, kms.NewSymmetricCryptoServiceClient(connection))
+	if err != nil {
+		_ = connection.Close()
+		return nil, err
+	}
+	provider.connection = connection
+	return provider, nil
 }
 
-func newYandexKMSKeyring(activeKeyID string, keys map[string]string, tokens IAMTokenSource, endpoint string, allowHTTP bool) (*YandexKMSKeyring, error) {
-	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && !(allowHTTP && parsed.Scheme == "http")) || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return nil, errors.New("invalid Yandex KMS endpoint")
-	}
-	if activeKeyID == "" || len(keys) == 0 || tokens == nil {
-		return nil, errors.New("Yandex KMS requires an active key alias, keyring, and IAM token source")
+func newYandexKMSKeyring(activeKeyID string, keys map[string]string, tokens IAMTokenSource, client symmetricCryptoClient) (*YandexKMSKeyring, error) {
+	if activeKeyID == "" || len(keys) == 0 || tokens == nil || client == nil {
+		return nil, errors.New("Yandex KMS requires an active key alias, keyring, IAM token source, and client")
 	}
 	cloned := make(map[string]string, len(keys))
 	for alias, keyID := range keys {
@@ -100,9 +115,15 @@ func newYandexKMSKeyring(activeKeyID string, keys map[string]string, tokens IAMT
 		return nil, errors.New("active Yandex KMS key alias is absent from keyring")
 	}
 	return &YandexKMSKeyring{
-		activeKeyID: activeKeyID, keys: cloned, tokens: tokens, endpoint: strings.TrimRight(parsed.String(), "/"),
-		client: &http.Client{Timeout: 5 * time.Second, CheckRedirect: rejectRedirect},
+		activeKeyID: activeKeyID, keys: cloned, tokens: tokens, client: client,
 	}, nil
+}
+
+func (p *YandexKMSKeyring) Close() error {
+	if p.connection == nil {
+		return nil
+	}
+	return p.connection.Close()
 }
 
 func (p *YandexKMSKeyring) GenerateDataKey(ctx context.Context) (DataKey, error) {
@@ -127,76 +148,45 @@ func (p *YandexKMSKeyring) DecryptDataKey(ctx context.Context, keyAlias string, 
 }
 
 func (p *YandexKMSKeyring) encrypt(ctx context.Context, keyID string, plaintext []byte) ([]byte, error) {
-	var result struct {
-		Ciphertext string `json:"ciphertext"`
-		KeyID      string `json:"keyId"`
-		VersionID  string `json:"versionId"`
-	}
-	body := map[string]string{
-		"plaintext":  base64.StdEncoding.EncodeToString(plaintext),
-		"aadContext": base64.StdEncoding.EncodeToString(keyWrapAAD),
-	}
-	if err := p.call(ctx, keyID, "encrypt", body, &result); err != nil {
+	authorized, err := p.authorizedContext(ctx)
+	if err != nil {
 		return nil, err
 	}
-	decoded, err := base64.StdEncoding.DecodeString(result.Ciphertext)
-	if err != nil || len(decoded) == 0 {
+	result, err := p.client.Encrypt(authorized, &kms.SymmetricEncryptRequest{
+		KeyId: keyID, Plaintext: plaintext, AadContext: keyWrapAAD,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("call Yandex KMS encrypt: %w", err)
+	}
+	if len(result.GetCiphertext()) == 0 {
 		return nil, errors.New("Yandex KMS returned invalid ciphertext")
 	}
-	return decoded, nil
+	return append([]byte(nil), result.GetCiphertext()...), nil
 }
 
 func (p *YandexKMSKeyring) decrypt(ctx context.Context, keyID string, wrapped []byte) ([]byte, error) {
-	var result struct {
-		Plaintext string `json:"plaintext"`
-		KeyID     string `json:"keyId"`
-		VersionID string `json:"versionId"`
-	}
-	body := map[string]string{
-		"ciphertext": base64.StdEncoding.EncodeToString(wrapped),
-		"aadContext": base64.StdEncoding.EncodeToString(keyWrapAAD),
-	}
-	if err := p.call(ctx, keyID, "decrypt", body, &result); err != nil {
+	authorized, err := p.authorizedContext(ctx)
+	if err != nil {
 		return nil, err
 	}
-	decoded, err := base64.StdEncoding.DecodeString(result.Plaintext)
-	if err != nil || len(decoded) != 32 {
+	result, err := p.client.Decrypt(authorized, &kms.SymmetricDecryptRequest{
+		KeyId: keyID, Ciphertext: wrapped, AadContext: keyWrapAAD,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("call Yandex KMS decrypt: %w", err)
+	}
+	if len(result.GetPlaintext()) != 32 {
 		return nil, errors.New("Yandex KMS returned invalid plaintext data key")
 	}
-	return decoded, nil
+	return append([]byte(nil), result.GetPlaintext()...), nil
 }
 
-func (p *YandexKMSKeyring) call(ctx context.Context, keyID, operation string, body any, destination any) error {
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
+func (p *YandexKMSKeyring) authorizedContext(ctx context.Context) (context.Context, error) {
 	token, err := p.tokens.Token(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	endpoint := p.endpoint + "/kms/v1/keys/" + url.PathEscape(keyID) + ":" + operation
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(encoded))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set("Content-Type", "application/json")
-	response, err := p.client.Do(request)
-	if err != nil {
-		return fmt.Errorf("call Yandex KMS %s", operation)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("Yandex KMS %s returned HTTP %d", operation, response.StatusCode)
-	}
-	decoder := json.NewDecoder(io.LimitReader(response.Body, 64*1024))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
-		return fmt.Errorf("decode Yandex KMS %s response", operation)
-	}
-	return nil
+	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token), nil
 }
 
 func rejectRedirect(*http.Request, []*http.Request) error {
