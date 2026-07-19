@@ -6,6 +6,19 @@ on:
       ref:
         description: Exact commit SHA or immutable Git ref to test
         required: true
+      product:
+        description: Product ID covered by the configured workload token
+        required: true
+        default: linka-plays
+        type: choice
+        options:
+          - linka-plays
+          - linka-looks
+          - linka-pictures
+          - linka-type
+          - linka-paperboard
+          - linka-site
+          - linka-tts
 
 permissions:
   contents: read
@@ -26,4 +39,5 @@ jobs:
           EMAIL_VERIFIER_TOKEN: ${{ secrets.EMAIL_VERIFIER_TOKEN }}
           PRIVACY_ADMIN_TOKEN: ${{ secrets.PRIVACY_ADMIN_TOKEN }}
           PREFLIGHT_EMAIL: ${{ secrets.PREFLIGHT_EMAIL }}
+          PREFLIGHT_PRODUCT: ${{ inputs.product }}
         run: sh ./staging-preflight.sh

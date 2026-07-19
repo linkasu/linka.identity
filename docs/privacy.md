@@ -29,6 +29,8 @@ Donation and account namespaces have distinct blind-index keys and donation scop
 
 Consent and telemetry preference have no inferred default. A denial atomically emits a suppression event. Deletion fans out all relevant pairwise aliases, waits for request-ID-bound Metric completion receipts, then erases/anonymizes live YDB records. Cancellation/rejection and erasure are mutually serialized and optimistic version checks reject stale workers.
 
+All LINKa products may share one Metric endpoint, but each keeps an immutable telemetry audience. Cross-product deletion fans out product/audience-specific aliases; one product's subject key is never reused as another product's analytics identifier.
+
 ## Retention and backup
 
 Retention periods remain legal/product decisions. Production owners must define periods for encrypted identities, installations, submissions, consent evidence, privacy requests, delivered outbox/audit rows, and logs. Live deletion does not immediately remove the data from the Serverless YDB 7-day system backup; expiry and restoration controls must be included in the approved policy. No PITR claim is made.
