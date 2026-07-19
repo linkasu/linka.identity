@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -38,6 +39,13 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
 	}
+	listener, err := net.Listen("tcp", cfg.HTTPAddr)
+	if err != nil {
+		return fmt.Errorf("listen HTTP: %w", err)
+	}
+	defer listener.Close()
+	logger.Info("identity service listening", "address", cfg.HTTPAddr)
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -131,8 +139,7 @@ func run(logger *slog.Logger) error {
 
 	serverErrors := make(chan error, 1)
 	go func() {
-		logger.Info("identity service listening", "address", cfg.HTTPAddr)
-		serverErrors <- httpServer.ListenAndServe()
+		serverErrors <- httpServer.Serve(listener)
 	}()
 
 	select {
