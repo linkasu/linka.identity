@@ -47,3 +47,48 @@ func TestTokenRejectsLongTTL(t *testing.T) {
 		t.Fatal("expected TTL rejection")
 	}
 }
+
+func TestRefreshTokenUsesSeparateAudienceAndExpires(t *testing.T) {
+	signer, _ := NewSigner(bytes.Repeat([]byte{7}, 32), "test-key", "identity.test", time.Minute, 5*time.Minute)
+	now := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	signer.now = func() time.Time { return now }
+	encoded, expiresAt, err := signer.SignRefresh("linka-plays", strings.Repeat("a", 64), "v3", 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := signer.VerifyRefresh(encoded)
+	if err != nil || claims.Audience != RefreshAudience || claims.Scopes[0] != RefreshScope || claims.PolicyVersion != "v3" || !expiresAt.Equal(now.Add(24*time.Hour)) {
+		t.Fatalf("claims=%#v expires=%v err=%v", claims, expiresAt, err)
+	}
+	signer.now = func() time.Time { return now.Add(25 * time.Hour) }
+	if _, err := signer.VerifyRefresh(encoded); err == nil {
+		t.Fatal("expired refresh token was accepted")
+	}
+	if _, _, err := signer.SignRefresh("linka-plays", strings.Repeat("a", 64), "v3", 366*24*time.Hour); err == nil {
+		t.Fatal("overlong refresh token was accepted")
+	}
+}
+
+func TestRefreshTokenRejectsWrongScopeAndTampering(t *testing.T) {
+	signer, _ := NewSigner(bytes.Repeat([]byte{7}, 32), "test-key", "identity.test", time.Minute, 5*time.Minute)
+	wrongScope, _, err := signer.signClaims(SignInput{
+		Audience: RefreshAudience, Product: "linka-plays", Subject: strings.Repeat("a", 64),
+		SubjectType: "installation", Scopes: []string{"telemetry:write"}, PolicyVersion: "v3", TTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := signer.VerifyRefresh(wrongScope); err == nil {
+		t.Fatal("wrong refresh scope was accepted")
+	}
+	valid, _, _ := signer.SignRefresh("linka-plays", strings.Repeat("a", 64), "v3", 24*time.Hour)
+	parts := strings.Split(valid, ".")
+	replacement := "A"
+	if parts[1][0] == 'A' {
+		replacement = "B"
+	}
+	parts[1] = replacement + parts[1][1:]
+	if _, err := signer.VerifyRefresh(strings.Join(parts, ".")); err == nil {
+		t.Fatal("tampered refresh token was accepted")
+	}
+}

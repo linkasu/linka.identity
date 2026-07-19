@@ -12,6 +12,12 @@ import (
 	"github.com/linka-cloud/linka.identity/internal/ids"
 )
 
+const (
+	RefreshAudience = "linka-identity-public-installation"
+	RefreshScope    = "installation:refresh"
+	maxRefreshTTL   = 365 * 24 * time.Hour
+)
+
 type Signer struct {
 	privateKey ed25519.PrivateKey
 	publicKeys map[string]ed25519.PublicKey
@@ -23,28 +29,30 @@ type Signer struct {
 }
 
 type Claims struct {
-	Issuer      string   `json:"iss"`
-	Subject     string   `json:"sub"`
-	Audience    string   `json:"aud"`
-	Product     string   `json:"product"`
-	SubjectType string   `json:"subject_type"`
-	Scopes      []string `json:"scope"`
-	PersonKey   *string  `json:"person_key,omitempty"`
-	OrgKey      *string  `json:"org_key,omitempty"`
-	IssuedAt    int64    `json:"iat"`
-	ExpiresAt   int64    `json:"exp"`
-	TokenID     string   `json:"jti"`
+	Issuer        string   `json:"iss"`
+	Subject       string   `json:"sub"`
+	Audience      string   `json:"aud"`
+	Product       string   `json:"product"`
+	SubjectType   string   `json:"subject_type"`
+	Scopes        []string `json:"scope"`
+	PersonKey     *string  `json:"person_key,omitempty"`
+	OrgKey        *string  `json:"org_key,omitempty"`
+	PolicyVersion string   `json:"policy_version,omitempty"`
+	IssuedAt      int64    `json:"iat"`
+	ExpiresAt     int64    `json:"exp"`
+	TokenID       string   `json:"jti"`
 }
 
 type SignInput struct {
-	Audience    string
-	Product     string
-	Subject     string
-	SubjectType string
-	Scopes      []string
-	PersonKey   *string
-	OrgKey      *string
-	TTL         time.Duration
+	Audience      string
+	Product       string
+	Subject       string
+	SubjectType   string
+	Scopes        []string
+	PersonKey     *string
+	OrgKey        *string
+	PolicyVersion string
+	TTL           time.Duration
 }
 
 func NewSigner(seed []byte, keyID, issuer string, defaultTTL, maxTTL time.Duration) (*Signer, error) {
@@ -101,6 +109,20 @@ func (s *Signer) SignClaims(input SignInput) (string, time.Time, error) {
 	if input.TTL <= 0 || input.TTL > s.maxTTL {
 		return "", time.Time{}, errors.New("requested token TTL is outside configured bounds")
 	}
+	return s.signClaims(input)
+}
+
+func (s *Signer) SignRefresh(productID, subjectKey, policyVersion string, ttl time.Duration) (string, time.Time, error) {
+	if policyVersion == "" || ttl <= 0 || ttl > maxRefreshTTL {
+		return "", time.Time{}, errors.New("refresh token TTL is outside configured bounds")
+	}
+	return s.signClaims(SignInput{
+		Audience: RefreshAudience, Product: productID, Subject: subjectKey,
+		SubjectType: "installation", Scopes: []string{RefreshScope}, PolicyVersion: policyVersion, TTL: ttl,
+	})
+}
+
+func (s *Signer) signClaims(input SignInput) (string, time.Time, error) {
 	now := s.now().UTC()
 	expiresAt := now.Add(input.TTL)
 	tokenID, err := ids.NewUUID()
@@ -109,17 +131,18 @@ func (s *Signer) SignClaims(input SignInput) (string, time.Time, error) {
 	}
 	header := map[string]string{"alg": "EdDSA", "typ": "JWT", "kid": s.keyID}
 	claims := Claims{
-		Issuer:      s.issuer,
-		Subject:     input.Subject,
-		Audience:    input.Audience,
-		Product:     input.Product,
-		SubjectType: input.SubjectType,
-		Scopes:      append([]string(nil), input.Scopes...),
-		PersonKey:   input.PersonKey,
-		OrgKey:      input.OrgKey,
-		IssuedAt:    now.Unix(),
-		ExpiresAt:   expiresAt.Unix(),
-		TokenID:     tokenID,
+		Issuer:        s.issuer,
+		Subject:       input.Subject,
+		Audience:      input.Audience,
+		Product:       input.Product,
+		SubjectType:   input.SubjectType,
+		Scopes:        append([]string(nil), input.Scopes...),
+		PersonKey:     input.PersonKey,
+		OrgKey:        input.OrgKey,
+		PolicyVersion: input.PolicyVersion,
+		IssuedAt:      now.Unix(),
+		ExpiresAt:     expiresAt.Unix(),
+		TokenID:       tokenID,
 	}
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
@@ -149,6 +172,26 @@ func (s *Signer) JWKS() map[string]any {
 }
 
 func (s *Signer) VerifyForTest(encoded string) (Claims, error) {
+	return s.verify(encoded)
+}
+
+func (s *Signer) VerifyRefresh(encoded string) (Claims, error) {
+	claims, err := s.verify(encoded)
+	if err != nil {
+		return Claims{}, err
+	}
+	now := s.now().UTC()
+	if claims.Issuer != s.issuer || claims.Audience != RefreshAudience || claims.SubjectType != "installation" ||
+		claims.Product == "" || claims.Subject == "" || len(claims.Scopes) != 1 || claims.Scopes[0] != RefreshScope ||
+		claims.PolicyVersion == "" || len(claims.PolicyVersion) > 100 ||
+		claims.IssuedAt > now.Add(5*time.Minute).Unix() || claims.ExpiresAt <= now.Unix() ||
+		claims.ExpiresAt <= claims.IssuedAt || time.Duration(claims.ExpiresAt-claims.IssuedAt)*time.Second > maxRefreshTTL {
+		return Claims{}, errors.New("invalid refresh token claims")
+	}
+	return claims, nil
+}
+
+func (s *Signer) verify(encoded string) (Claims, error) {
 	parts := strings.Split(encoded, ".")
 	if len(parts) != 3 {
 		return Claims{}, errors.New("invalid token structure")
@@ -158,9 +201,13 @@ func (s *Signer) VerifyForTest(encoded string) (Claims, error) {
 		return Claims{}, errors.New("invalid token header")
 	}
 	var header struct {
-		KeyID string `json:"kid"`
+		Algorithm string `json:"alg"`
+		Type      string `json:"typ"`
+		KeyID     string `json:"kid"`
 	}
-	if err := json.Unmarshal(headerPayload, &header); err != nil {
+	headerDecoder := json.NewDecoder(strings.NewReader(string(headerPayload)))
+	headerDecoder.DisallowUnknownFields()
+	if err := headerDecoder.Decode(&header); err != nil || header.Algorithm != "EdDSA" || header.Type != "JWT" {
 		return Claims{}, errors.New("invalid token header")
 	}
 	publicKey, ok := s.publicKeys[header.KeyID]
@@ -173,7 +220,9 @@ func (s *Signer) VerifyForTest(encoded string) (Claims, error) {
 		return Claims{}, errors.New("invalid token payload")
 	}
 	var claims Claims
-	if err := json.Unmarshal(payload, &claims); err != nil {
+	claimsDecoder := json.NewDecoder(strings.NewReader(string(payload)))
+	claimsDecoder.DisallowUnknownFields()
+	if err := claimsDecoder.Decode(&claims); err != nil {
 		return Claims{}, errors.New("invalid token claims")
 	}
 	return claims, nil

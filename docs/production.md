@@ -33,10 +33,14 @@ Lockbox stores workload credentials, product registry, pairwise HMAC key, blind-
 `.github/workflows/publish.yml` publishes `sha-<commit>` from the exact CI-tested commit. Deployment mirrors that image, resolves its `sha256:` registry digest, and uses the digest for both steps:
 
 1. Run `/usr/local/bin/schema` against Serverless YDB with the deploy service-account key.
-2. Only after schema succeeds, create the runtime revision with metadata auth and Lockbox references.
-3. Verify `/readyz` and JWKS.
+2. Snapshot the active revision and gateway specification, then apply the reviewed gateway `20 rps` limit while the old revision remains active.
+3. Verify gateway health and the public worker-path `404` before creating the new runtime revision.
+4. Create the runtime revision with metadata auth and Lockbox references, then verify workers, `/readyz`, JWKS, and the public broker route.
+5. On any failure after the snapshot, restore both the previous revision and gateway specification.
 
 No `DATABASE_URL`, PostgreSQL migration, mutable deployment tag, VPC connector, or service-account-key JSON exists in the runtime revision.
+
+The automated rollback restores only the previous container revision and gateway specification, not YDB DDL. Until a backward-compatible migration/rollback policy is implemented, the production workflow explicitly refuses any `schema.Version` other than `1`; schema bumps require a separately reviewed release procedure.
 
 ## Serverless worker scheduling
 
@@ -51,7 +55,13 @@ Do not expose the raw Serverless Container invocation endpoint. Route through th
 - global sustained 20 requests/second, burst 40;
 - `/v1/email-verifications`: 5 requests/minute per source and workload;
 - `/v1/tokens`: 30 requests/minute per workload;
+- `/v1/public/installations`: registration abuse controls at the edge in addition to the global limit;
+- public installation request bodies: 4 KiB and no free-form/device identifier fields;
 - request body 64 KiB, headers 1 MiB, upstream timeout 30 seconds.
+
+Public installation routes are disabled unless `PUBLIC_INSTALLATION_PRODUCTS` and an exact current registration policy version are configured. Native clients omit `Origin`; browser origins remain disabled unless each exact HTTPS origin receives a separate review. Registration requires a client-generated UUID request ID; the server derives a secret deterministic root from the exact request body, so an exact retry after an unknown response returns the same installation without exposing the root. The signed refresh capability uses a distinct audience and scope, carries the granted policy version, is never persisted by Identity, and must be stored in the client OS keychain/Keystore. Withdrawal must present that granted version, so a policy rollout can never block denial or fabricate evidence for another policy. Denial remains usable with the same capability for idempotent retries, but token refresh returns `telemetry_denied`; re-consent creates a new installation with a new request ID.
+
+The application additionally limits public registrations to a burst of six and one replenished registration per ten seconds per warm container. This defense-in-depth limiter and the gateway-wide `20 rps` cap protect capacity but do not identify or persist source IPs. Before materially increasing traffic, add a separately reviewed edge/SWS per-source rule or isolate the public registration gateway quota from internal API traffic.
 
 Record gateway quota/rate-limit approval and alert on sustained `429`, rejected request size, and quota utilization above 80%.
 

@@ -49,11 +49,16 @@ func TestYDBIdentityOutboxAndPrivacyFlow(t *testing.T) {
 		productID, "denied", recordedAt, recordedAt); err != nil {
 		t.Fatalf("deny telemetry: %v", err)
 	}
+	preference, err := database.GetTelemetryPreference(ctx, store.Subject{Kind: "installation", ID: installationID}, productID)
+	if err != nil || preference.Preference != "denied" || !preference.RecordedAt.Equal(recordedAt) {
+		t.Fatalf("read telemetry preference: preference=%#v err=%v", preference, err)
+	}
 	events, err := database.ClaimOutbox(ctx, 20)
 	if err != nil || len(events) != 1 || events[0].Topic != "telemetry.suppression.requested" {
 		t.Fatalf("claim suppression: events=%#v err=%v", events, err)
 	}
 	completeOutbox(t, ctx, database, events[0])
+	assertPublicInstallationAtomicFlow(t, ctx, database, productID)
 
 	provider, err := cryptokit.NewLocalAESKeyProvider("integration-kek", bytes.Repeat([]byte{1}, 32))
 	if err != nil {
@@ -151,6 +156,55 @@ func TestYDBIdentityOutboxAndPrivacyFlow(t *testing.T) {
 		t.Fatalf("erased account remained active: %v", err)
 	}
 	assertPrivacyCancellation(t, ctx, database, productID)
+}
+
+func assertPublicInstallationAtomicFlow(t *testing.T, ctx context.Context, database *store.Store, productID string) {
+	t.Helper()
+	recordedAt := time.Now().UTC().Truncate(time.Microsecond)
+	installationID, installationKey := newID(t), opaqueKey(t)
+	registration := store.PublicInstallationRegistration{
+		Installation: store.Installation{ID: installationID, ProductID: productID, Platform: "windows"},
+		OpaqueKey:    installationKey, Audience: "metric", Preference: "allowed", PreferenceAt: recordedAt,
+		SuppressionID: newID(t),
+		Consent: store.Consent{
+			ID: newID(t), Subject: store.Subject{Kind: "installation", ID: installationID}, ProductID: productID,
+			ConsentType: "telemetry", PolicyVersion: "v1", Status: "granted", RecordedAt: recordedAt,
+		},
+	}
+	installation, err := database.RegisterPublicInstallation(ctx, registration)
+	if err != nil || installation.ID != installationID {
+		t.Fatalf("register public installation: installation=%#v err=%v", installation, err)
+	}
+	if replayed, err := database.RegisterPublicInstallation(ctx, registration); err != nil || replayed.ID != installationID || !replayed.CreatedAt.Equal(installation.CreatedAt) {
+		t.Fatalf("replay public installation: installation=%#v err=%v", replayed, err)
+	}
+	preference, err := database.GetTelemetryPreference(ctx, store.Subject{Kind: "installation", ID: installationID}, productID)
+	if err != nil || preference.Preference != "allowed" {
+		t.Fatalf("public installation preference=%#v err=%v", preference, err)
+	}
+	deniedAt := recordedAt.Add(time.Second)
+	denial := store.PublicTelemetryDenial{
+		Subject: store.Subject{Kind: "installation", ID: installationID}, SubjectKey: installationKey,
+		ProductID: productID, RecordedAt: deniedAt, SuppressionID: newID(t),
+		Consent: store.Consent{
+			ID: newID(t), Subject: store.Subject{Kind: "installation", ID: installationID}, ProductID: productID,
+			ConsentType: "telemetry", PolicyVersion: "retired-v0", Status: "withdrawn", RecordedAt: deniedAt,
+		},
+	}
+	if _, err := database.DenyPublicInstallation(ctx, denial); err != nil {
+		t.Fatalf("deny public installation: %v", err)
+	}
+	events, err := database.ClaimOutbox(ctx, 20)
+	if err != nil || len(events) != 1 || events[0].Topic != "telemetry.suppression.requested" {
+		t.Fatalf("public suppression events=%#v err=%v", events, err)
+	}
+	completeOutbox(t, ctx, database, events[0])
+	if effectiveAt, err := database.DenyPublicInstallation(ctx, denial); err != nil || !effectiveAt.Equal(deniedAt) {
+		t.Fatalf("replay public denial: %v", err)
+	}
+	if events, err := database.ClaimOutbox(ctx, 20); err != nil || len(events) != 0 {
+		t.Fatalf("replayed public denial created outbox: events=%#v err=%v", events, err)
+	}
 }
 
 func assertExpiredVerificationCleanup(t *testing.T, ctx context.Context, database *store.Store, provider cryptokit.KeyProvider, indexer *cryptokit.BlindIndexer, productID string) {

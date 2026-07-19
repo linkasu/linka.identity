@@ -79,6 +79,93 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+  /v1/public/installations:
+    post:
+      operationId: registerPublicInstallation
+      summary: Register a consented anonymous installation without a workload credential
+      description: >-
+        Native clients receive an audience-separated refresh capability and, when
+        telemetry is allowed, a short-lived Metrics JWT. No device identifier or
+        free-form metadata is accepted. Exact retries with the same request_id and
+        body resolve to the same installation. A new registration is required after denial.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublicInstallationRequest"
+      responses:
+        "201":
+          description: Anonymous installation registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicInstallationResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/public/installations/token:
+    post:
+      operationId: refreshPublicInstallationToken
+      summary: Exchange an installation refresh capability for a short-lived Metrics JWT
+      security:
+        - refreshBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "200":
+          description: Metrics JWT issued for an allowed installation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicTokenResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/public/installations/telemetry-preference:
+    put:
+      operationId: denyPublicInstallationTelemetry
+      summary: Durably deny telemetry for an anonymous installation
+      description: >-
+        Denial triggers the existing Metrics suppression outbox. Re-enabling the
+        suppressed subject is forbidden; explicit later consent creates a new installation.
+      security:
+        - refreshBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublicPreferenceRequest"
+      responses:
+        "200":
+          description: Telemetry denied and suppression queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicPreferenceResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
   /v1/email-identities:
     post:
       operationId: registerEmailIdentity
@@ -426,6 +513,11 @@ components:
       type: http
       scheme: bearer
       description: Per-workload credential. Server-side roles and product scopes authorize each route.
+    refreshBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Audience-separated anonymous installation refresh capability.
   parameters:
     UUIDPath:
       name: id
@@ -449,7 +541,7 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     Unauthorized:
-      description: Internal bearer credential is missing or invalid
+      description: Required workload or installation bearer credential is missing or invalid
       content:
         application/json:
           schema:
@@ -478,6 +570,16 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Status"
+    TooManyRequests:
+      description: Public registration capacity is temporarily exhausted
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
   schemas:
     UUID:
       type: string
@@ -539,6 +641,109 @@ components:
         platform:
           type: string
         created_at:
+          type: string
+          format: date-time
+    PublicInstallationRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, product_id, platform, preference, policy_version, recorded_at]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/UUID"
+        product_id:
+          $ref: "#/components/schemas/ProductID"
+        platform:
+          type: string
+          enum: [windows, macos, linux, web, android, ios]
+        preference:
+          type: string
+          enum: [allowed, denied]
+        policy_version:
+          type: string
+          minLength: 1
+          maxLength: 100
+        recorded_at:
+          type: string
+          format: date-time
+    PublicAccessToken:
+      type: object
+      additionalProperties: false
+      required: [access_token, token_type, expires_at]
+      properties:
+        access_token:
+          type: string
+        token_type:
+          const: Bearer
+        expires_at:
+          type: string
+          format: date-time
+    PublicInstallationResponse:
+      type: object
+      additionalProperties: false
+      required: [installation_key, product, platform, preference, policy_version, recorded_at, refresh_token, refresh_expires_at]
+      properties:
+        installation_key:
+          $ref: "#/components/schemas/OpaqueKey"
+        product:
+          $ref: "#/components/schemas/ProductID"
+        platform:
+          type: string
+        preference:
+          type: string
+          enum: [allowed, denied]
+        policy_version:
+          type: string
+        recorded_at:
+          type: string
+          format: date-time
+        refresh_token:
+          type: string
+        refresh_expires_at:
+          type: string
+          format: date-time
+        metrics_token:
+          oneOf:
+            - $ref: "#/components/schemas/PublicAccessToken"
+            - type: "null"
+    PublicTokenResponse:
+      type: object
+      additionalProperties: false
+      required: [installation_key, product, metrics_token]
+      properties:
+        installation_key:
+          $ref: "#/components/schemas/OpaqueKey"
+        product:
+          $ref: "#/components/schemas/ProductID"
+        metrics_token:
+          $ref: "#/components/schemas/PublicAccessToken"
+    PublicPreferenceRequest:
+      type: object
+      additionalProperties: false
+      required: [preference, policy_version, recorded_at]
+      properties:
+        preference:
+          const: denied
+        policy_version:
+          type: string
+          minLength: 1
+          maxLength: 100
+        recorded_at:
+          type: string
+          format: date-time
+    PublicPreferenceResponse:
+      type: object
+      additionalProperties: false
+      required: [installation_key, product, preference, policy_version, recorded_at]
+      properties:
+        installation_key:
+          $ref: "#/components/schemas/OpaqueKey"
+        product:
+          $ref: "#/components/schemas/ProductID"
+        preference:
+          const: denied
+        policy_version:
+          type: string
+        recorded_at:
           type: string
           format: date-time
     EmailVerificationRequest:

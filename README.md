@@ -14,6 +14,7 @@ Minimal identity and privacy-control service for LINKa products. Accounts remain
 - Only an `email_verifier` workload may attest ownership before a product workload consumes a verification.
 - Root IDs and encrypted email remain in YDB. Responses and JWTs use product/audience/type-specific pairwise opaque keys.
 - Metric must return a matching `completed` deletion receipt before YDB erasure can complete.
+- Public anonymous installations use an audience-separated signed refresh capability; every refresh rechecks the active installation and explicit telemetry preference in YDB.
 
 ## Local development
 
@@ -28,7 +29,7 @@ go run ./cmd/schema
 go run ./cmd/identity
 ```
 
-Copy the remaining settings from `.env.example`, replacing every key and workload-token placeholder with independent random values. Every `/v1` route requires a role- and product-scoped workload credential. Health, readiness, and JWKS routes are public; see `openapi/openapi.yaml`.
+Copy the remaining settings from `.env.example`, replacing every key and workload-token placeholder with independent random values. Internal `/v1` routes require a role- and product-scoped workload credential. The narrowly scoped `/v1/public/installations*` routes are enabled only for `PUBLIC_INSTALLATION_PRODUCTS`; see `openapi/openapi.yaml`.
 
 ## Verification
 
@@ -62,6 +63,10 @@ TEST_YDB_ENDPOINT=grpc://127.0.0.1:2136 TEST_YDB_DATABASE=/local \
 | `TOKEN_SIGNING_KEYS_JSON` | Active and retiring 32-byte Ed25519 seeds by immutable key ID. |
 | `TOKEN_ACTIVE_KEY_ID` | Signing key used for new JWTs. |
 | `TOKEN_ISSUER` | Exact token issuer. |
+| `PUBLIC_INSTALLATION_PRODUCTS` | Semicolon-separated closed allowlist for anonymous native-client registration; empty disables public routes. |
+| `PUBLIC_INSTALLATION_POLICY_VERSION` | Exact policy version accepted by public registration and denial. |
+| `PUBLIC_INSTALLATION_REFRESH_TTL` | Signed refresh capability lifetime, from 24 hours through 365 days. |
+| `PUBLIC_INSTALLATION_ALLOWED_ORIGINS` | Optional exact HTTPS browser origins; empty keeps the broker native/server-side only. |
 
 Operational settings and deployment controls are in `docs/operations.md` and `docs/production.md`.
 
