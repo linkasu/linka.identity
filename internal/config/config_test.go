@@ -33,6 +33,27 @@ func TestLoadValidConfiguration(t *testing.T) {
 	if cfg.MinorCrossProductLinking {
 		t.Fatal("minor linking must default to disabled")
 	}
+	if len(cfg.Products) != 7 || cfg.Products["linka-plays"].TelemetryAudience != "linka-plays-metric" || cfg.Products["linka-tts"].TelemetryAudience != "linka-tts-metric" {
+		t.Fatalf("products = %#v", cfg.Products)
+	}
+}
+
+func TestLoadRejectsWorkloadWithUnknownProduct(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	values := validValues(key)
+	values["WORKLOADS_JSON"] = `[{"id":"unknown","token":"` + strings.Repeat("x", 32) + `","roles":["product"],"products":["unknown"]}]`
+	if _, err := load(mapLookup(values)); err == nil || !strings.Contains(err.Error(), "unknown product") {
+		t.Fatalf("unknown workload product error = %v", err)
+	}
+}
+
+func TestLoadRejectsEmptyProductAudience(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	values := validValues(key)
+	values["PRODUCTS_JSON"] = `{"linka-plays":{"telemetry_audience":""}}`
+	if _, err := load(mapLookup(values)); err == nil {
+		t.Fatal("empty telemetry audience was accepted")
+	}
 }
 
 func TestLoadRejectsNonTLSOutboxURL(t *testing.T) {
@@ -91,8 +112,8 @@ func validValues(key string) map[string]string {
 		"DEPLOYMENT_ENVIRONMENT":      "development",
 		"YDB_ENDPOINT":                "grpc://localhost:2136",
 		"YDB_DATABASE":                "/local",
-		"WORKLOADS_JSON":              `[{"id":"plays","token":"` + strings.Repeat("x", 32) + `","roles":["product"],"products":["linka-plays"]}]`,
-		"PRODUCTS_JSON":               `{"linka-plays":{"telemetry_audience":"linka-metric"}}`,
+		"WORKLOADS_JSON":              `[{"id":"products","token":"` + strings.Repeat("x", 32) + `","roles":["product"],"products":["linka-plays","linka-looks","linka-pictures","linka-type","linka-paperboard","linka-site","linka-tts"]}]`,
+		"PRODUCTS_JSON":               `{"linka-plays":{"telemetry_audience":"linka-plays-metric"},"linka-looks":{"telemetry_audience":"linka-looks-metric"},"linka-pictures":{"telemetry_audience":"linka-pictures-metric"},"linka-type":{"telemetry_audience":"linka-type-metric"},"linka-paperboard":{"telemetry_audience":"linka-paperboard-metric"},"linka-site":{"telemetry_audience":"linka-site-metric"},"linka-tts":{"telemetry_audience":"linka-tts-metric"}}`,
 		"PAIRWISE_ID_KEY_BASE64":      key,
 		"EMAIL_KEY_PROVIDER":          "local",
 		"EMAIL_LOCAL_KEKS_JSON":       `{"test-key":"` + key + `"}`,

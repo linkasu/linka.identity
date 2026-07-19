@@ -6,6 +6,8 @@ Run `schema` as a one-shot step before starting a new application revision. It i
 
 Use `REQUIRE_OUTBOX_DELIVERY=true` in production. Configuration then requires an HTTPS Metric privacy URL; delivery uses a short-lived Identity-signed `privacy:write` JWT.
 
+Production products use immutable product-specific telemetry audiences even though they share `https://metrics.nkolinka.ru`: `linka-plays-metric`, `linka-looks-metric`, `linka-pictures-metric`, `linka-type-metric`, `linka-paperboard-metric`, `linka-site-metric`, and `linka-tts-metric`. Never change an existing audience in place: pairwise subject keys and privacy aliases include it. Add a new alias migration and complete downstream deletion compatibility first.
+
 ## YDB credentials
 
 - Local YDB uses `YDB_ANONYMOUS_CREDENTIALS=1`.

@@ -7,10 +7,11 @@ set -eu
 : "${EMAIL_VERIFIER_TOKEN:?EMAIL_VERIFIER_TOKEN is required}"
 : "${PRIVACY_ADMIN_TOKEN:?PRIVACY_ADMIN_TOKEN is required}"
 : "${PREFLIGHT_EMAIL:?PREFLIGHT_EMAIL is required}"
+: "${PREFLIGHT_PRODUCT:?PREFLIGHT_PRODUCT is required}"
 
 identity="${IDENTITY_URL%/}"
 metric="${METRIC_URL%/}"
-product="linka-plays"
+product="$PREFLIGHT_PRODUCT"
 now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 uuid() { python3 -c 'import uuid; print(uuid.uuid4())'; }
 
