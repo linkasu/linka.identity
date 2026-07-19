@@ -31,7 +31,7 @@ type PublicTelemetryDenial struct {
 }
 
 func (s *Store) RegisterPublicInstallation(ctx context.Context, input PublicInstallationRegistration) (Installation, error) {
-	now := s.now().UTC()
+	now := s.now().UTC().Truncate(time.Microsecond)
 	result := input.Installation
 	preferenceID, err := ids.NewUUID()
 	if err != nil {
