@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/linka-cloud/linka.identity/internal/authz"
+	"github.com/linka-cloud/linka.identity/internal/domain"
 )
 
 type Product struct {
@@ -20,33 +21,37 @@ type Product struct {
 }
 
 type Config struct {
-	Environment              string
-	HTTPAddr                 string
-	YDBEndpoint              string
-	YDBDatabase              string
-	Workloads                []authz.Workload
-	Products                 map[string]Product
-	PairwiseIDKey            []byte
-	EmailKeyProvider         string
-	EmailKeyActiveID         string
-	EmailLocalKEKs           map[string][]byte
-	EmailYandexKMSKeys       map[string]string
-	BlindIndexKeys           map[int][]byte
-	BlindIndexCurrentVersion int
-	TokenSigningSeeds        map[string][]byte
-	TokenActiveKeyID         string
-	TokenIssuer              string
-	TokenTTL                 time.Duration
-	TokenMaxTTL              time.Duration
-	MinorCrossProductLinking bool
-	OutboxURL                string
-	OutboxPollInterval       time.Duration
-	OutboxMaxAttempts        int
-	OutboxReadinessMaxAge    time.Duration
-	RequireOutboxDelivery    bool
-	EmailVerificationTTL     time.Duration
-	EmailCleanupInterval     time.Duration
-	ShutdownTimeout          time.Duration
+	Environment                string
+	HTTPAddr                   string
+	YDBEndpoint                string
+	YDBDatabase                string
+	Workloads                  []authz.Workload
+	Products                   map[string]Product
+	PairwiseIDKey              []byte
+	EmailKeyProvider           string
+	EmailKeyActiveID           string
+	EmailLocalKEKs             map[string][]byte
+	EmailYandexKMSKeys         map[string]string
+	BlindIndexKeys             map[int][]byte
+	BlindIndexCurrentVersion   int
+	TokenSigningSeeds          map[string][]byte
+	TokenActiveKeyID           string
+	TokenIssuer                string
+	TokenTTL                   time.Duration
+	TokenMaxTTL                time.Duration
+	PublicInstallationProducts map[string]struct{}
+	PublicPolicyVersion        string
+	PublicRefreshTTL           time.Duration
+	PublicAllowedOrigins       map[string]struct{}
+	MinorCrossProductLinking   bool
+	OutboxURL                  string
+	OutboxPollInterval         time.Duration
+	OutboxMaxAttempts          int
+	OutboxReadinessMaxAge      time.Duration
+	RequireOutboxDelivery      bool
+	EmailVerificationTTL       time.Duration
+	EmailCleanupInterval       time.Duration
+	ShutdownTimeout            time.Duration
 }
 
 func Load() (Config, error) {
@@ -176,6 +181,27 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	if cfg.TokenTTL <= 0 || cfg.TokenMaxTTL <= 0 || cfg.TokenTTL > cfg.TokenMaxTTL {
 		return Config{}, errors.New("token TTL values must be positive and TOKEN_TTL must not exceed TOKEN_MAX_TTL")
 	}
+	cfg.PublicInstallationProducts, err = stringSet(lookup, "PUBLIC_INSTALLATION_PRODUCTS")
+	if err != nil {
+		return Config{}, err
+	}
+	for productID := range cfg.PublicInstallationProducts {
+		if _, ok := cfg.Products[productID]; !ok {
+			return Config{}, fmt.Errorf("PUBLIC_INSTALLATION_PRODUCTS references unknown product %s", productID)
+		}
+	}
+	cfg.PublicPolicyVersion = strings.TrimSpace(valueOrDefault(lookup, "PUBLIC_INSTALLATION_POLICY_VERSION", ""))
+	if len(cfg.PublicInstallationProducts) > 0 && (len(cfg.PublicPolicyVersion) < 1 || len(cfg.PublicPolicyVersion) > 100) {
+		return Config{}, errors.New("PUBLIC_INSTALLATION_POLICY_VERSION is required and must contain at most 100 characters")
+	}
+	cfg.PublicRefreshTTL, err = durationValue(lookup, "PUBLIC_INSTALLATION_REFRESH_TTL", 180*24*time.Hour)
+	if err != nil || cfg.PublicRefreshTTL < 24*time.Hour || cfg.PublicRefreshTTL > 365*24*time.Hour {
+		return Config{}, errors.New("PUBLIC_INSTALLATION_REFRESH_TTL must be between 24 hours and 365 days")
+	}
+	cfg.PublicAllowedOrigins, err = origins(lookup, "PUBLIC_INSTALLATION_ALLOWED_ORIGINS")
+	if err != nil {
+		return Config{}, err
+	}
 	cfg.MinorCrossProductLinking, err = boolValue(lookup, "MINOR_CROSS_PRODUCT_LINKING_ENABLED", false)
 	if err != nil {
 		return Config{}, err
@@ -274,6 +300,39 @@ func products(lookup func(string) (string, bool)) (map[string]Product, error) {
 		if id == "" || product.TelemetryAudience == "" {
 			return nil, errors.New("PRODUCTS_JSON contains an invalid product")
 		}
+	}
+	return result, nil
+}
+
+func stringSet(lookup func(string) (string, bool), name string) (map[string]struct{}, error) {
+	result := make(map[string]struct{})
+	raw := strings.TrimSpace(valueOrDefault(lookup, name, ""))
+	if raw == "" {
+		return result, nil
+	}
+	for _, value := range strings.Split(raw, ";") {
+		value = strings.TrimSpace(value)
+		if !domain.ValidProductID(value) {
+			return nil, fmt.Errorf("%s contains an invalid product ID", name)
+		}
+		result[value] = struct{}{}
+	}
+	return result, nil
+}
+
+func origins(lookup func(string) (string, bool), name string) (map[string]struct{}, error) {
+	result := make(map[string]struct{})
+	raw := strings.TrimSpace(valueOrDefault(lookup, name, ""))
+	if raw == "" {
+		return result, nil
+	}
+	for _, value := range strings.Split(raw, ";") {
+		value = strings.TrimSpace(value)
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return nil, fmt.Errorf("%s must contain exact HTTPS origins separated by semicolons", name)
+		}
+		result[value] = struct{}{}
 	}
 	return result, nil
 }

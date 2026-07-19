@@ -16,6 +16,7 @@ import (
 	"github.com/linka-cloud/linka.identity/internal/config"
 	"github.com/linka-cloud/linka.identity/internal/cryptokit"
 	"github.com/linka-cloud/linka.identity/internal/httpapi"
+	"github.com/linka-cloud/linka.identity/internal/installationbroker"
 	"github.com/linka-cloud/linka.identity/internal/outbox"
 	"github.com/linka-cloud/linka.identity/internal/pairwise"
 	"github.com/linka-cloud/linka.identity/internal/privacyworker"
@@ -112,11 +113,25 @@ func run(logger *slog.Logger) error {
 	for productID, product := range cfg.Products {
 		products[productID] = product.TelemetryAudience
 	}
+	var publicBroker *installationbroker.Broker
+	if len(cfg.PublicInstallationProducts) > 0 {
+		publicProducts := make(map[string]installationbroker.Product, len(products))
+		for productID := range products {
+			publicProducts[productID] = installationbroker.Product{Audience: products[productID]}
+		}
+		publicBroker, err = installationbroker.New(database, tokenSigner, pairwiseIDs, installationbroker.Config{
+			Products: publicProducts, RegistrationProducts: cfg.PublicInstallationProducts,
+			PolicyVersion: cfg.PublicPolicyVersion, RefreshTTL: cfg.PublicRefreshTTL,
+		})
+		if err != nil {
+			return fmt.Errorf("public installation broker: %w", err)
+		}
+	}
 	identityService := service.NewIdentityServiceWithVerification(database, envelope, indexer, cfg.MinorCrossProductLinking, cfg.EmailVerificationTTL)
 	outboxWorker := outbox.New(database, cfg.OutboxURL, tokenSigner, products, cfg.OutboxPollInterval, cfg.OutboxMaxAttempts, logger)
 	privacyWorker := privacyworker.New(database, cfg.OutboxPollInterval, cfg.OutboxMaxAttempts, logger)
 	verificationWorker := verificationworker.New(database, cfg.EmailCleanupInterval, logger)
-	apiHandler := httpapi.New(database, identityService, tokenSigner, authenticator, pairwiseIDs, products,
+	apiHandler := httpapi.New(database, identityService, tokenSigner, authenticator, pairwiseIDs, products, publicBroker, cfg.PublicAllowedOrigins,
 		cfg.RequireOutboxDelivery, cfg.OutboxReadinessMaxAge, logger)
 	handler := http.NewServeMux()
 	handler.Handle(workertick.Path, workertick.New(outboxWorker, privacyWorker, verificationWorker))

@@ -4,7 +4,7 @@
 
 Assets include email plaintext/envelopes, blind-index/signing/pairwise keys, workload credentials, linkage graph, organization text, consent, age, preferences, and privacy evidence.
 
-Trust boundaries are product backend to HTTP API, Identity to Serverless YDB, Identity to YC KMS/metadata/Lockbox, outbox to Metric, token consumer to JWKS, and organization/privacy administrators to internal routes.
+Trust boundaries are product backend to HTTP API, native client to the narrow public installation broker, Identity to Serverless YDB, Identity to YC KMS/metadata/Lockbox, outbox to Metric, token consumer to JWKS, and organization/privacy administrators to internal routes.
 
 ## Threats and controls
 
@@ -23,6 +23,9 @@ Trust boundaries are product backend to HTTP API, Identity to Serverless YDB, Id
 | Premature privacy completion | Parent FSM, request-bound Metric receipts, final YDB step, same-transaction re-check | Backup expiry and external evidence policy |
 | Credential theft | Runtime metadata auth; key JSON only mounted in CI/local schema job | Short-lived CI federation when available |
 | Resource exhaustion/free-tier limit | Bounded HTTP/work batches, YDB limits and indexes | Gateway limits, capacity alerts, load tests |
+| Anonymous client injects telemetry | Closed products/platforms/kinds, explicit consent, pairwise subject, short Metrics JWT, global gateway limit | Per-source edge limits and optional platform attestation |
+| Refresh capability theft | Separate audience/scope, bounded lifetime, live installation/preference check, no server/log persistence | OS keychain/Keystore and client compromise response |
+| Denied subject is re-enabled | Public API accepts denial only; later consent creates a new installation | Monitor repeated registrations and document client UX |
 
 The public Serverless YDB endpoint uses TLS and IAM; no VPC connector is required. Public endpoint does not mean anonymous access.
 
@@ -30,4 +33,4 @@ The public Serverless YDB endpoint uses TLS and IAM; no VPC connector is require
 
 Password auth, social login, MFA, guardian proofing, automatic organization matching, direct analytics writes, and immediate backup erasure are out of scope.
 
-Require security review before enabling minor linkage, adding email decryption/export, changing normalization, introducing reconciliation, adding outbox topics, exposing APIs to clients, changing token claims, changing YDB key/index design, or adding analytics integrations.
+The public installation broker review permits only the documented no-PII native-client routes, closed product allowlist, audience-separated refresh capability, exact policy version, and durable denial flow. Require a new security review before browser origins, platform attestation, new public fields/routes, minor linkage, email decryption/export, changing normalization, reconciliation, outbox topics, Metrics token claims, YDB key/index design, or new analytics payloads.

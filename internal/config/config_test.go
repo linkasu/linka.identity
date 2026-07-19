@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadRejectsMissingSecrets(t *testing.T) {
@@ -35,6 +36,23 @@ func TestLoadValidConfiguration(t *testing.T) {
 	}
 	if len(cfg.Products) != 7 || cfg.Products["linka-plays"].TelemetryAudience != "linka-plays-metric" || cfg.Products["linka-tts"].TelemetryAudience != "linka-tts-metric" {
 		t.Fatalf("products = %#v", cfg.Products)
+	}
+	if len(cfg.PublicInstallationProducts) != 4 || cfg.PublicPolicyVersion != "2026-07-19-v3" || cfg.PublicRefreshTTL != 180*24*time.Hour {
+		t.Fatalf("public installation config = %#v %q %v", cfg.PublicInstallationProducts, cfg.PublicPolicyVersion, cfg.PublicRefreshTTL)
+	}
+}
+
+func TestLoadRejectsUnknownPublicProductAndUnsafeOrigin(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+	values := validValues(key)
+	values["PUBLIC_INSTALLATION_PRODUCTS"] = "linka-plays;unknown"
+	if _, err := load(mapLookup(values)); err == nil || !strings.Contains(err.Error(), "unknown product") {
+		t.Fatalf("unknown public product error = %v", err)
+	}
+	values["PUBLIC_INSTALLATION_PRODUCTS"] = "linka-plays"
+	values["PUBLIC_INSTALLATION_ALLOWED_ORIGINS"] = "https://linka.su/path"
+	if _, err := load(mapLookup(values)); err == nil || !strings.Contains(err.Error(), "origins") {
+		t.Fatalf("unsafe origin error = %v", err)
 	}
 }
 
@@ -109,20 +127,22 @@ func TestLoadRejectsServiceAccountKeyInProductionRuntime(t *testing.T) {
 
 func validValues(key string) map[string]string {
 	return map[string]string{
-		"DEPLOYMENT_ENVIRONMENT":      "development",
-		"YDB_ENDPOINT":                "grpc://localhost:2136",
-		"YDB_DATABASE":                "/local",
-		"WORKLOADS_JSON":              `[{"id":"products","token":"` + strings.Repeat("x", 32) + `","roles":["product"],"products":["linka-plays","linka-looks","linka-pictures","linka-type","linka-paperboard","linka-site","linka-tts"]}]`,
-		"PRODUCTS_JSON":               `{"linka-plays":{"telemetry_audience":"linka-plays-metric"},"linka-looks":{"telemetry_audience":"linka-looks-metric"},"linka-pictures":{"telemetry_audience":"linka-pictures-metric"},"linka-type":{"telemetry_audience":"linka-type-metric"},"linka-paperboard":{"telemetry_audience":"linka-paperboard-metric"},"linka-site":{"telemetry_audience":"linka-site-metric"},"linka-tts":{"telemetry_audience":"linka-tts-metric"}}`,
-		"PAIRWISE_ID_KEY_BASE64":      key,
-		"EMAIL_KEY_PROVIDER":          "local",
-		"EMAIL_LOCAL_KEKS_JSON":       `{"test-key":"` + key + `"}`,
-		"EMAIL_KEY_ACTIVE_ID":         "test-key",
-		"BLIND_INDEX_KEYS_JSON":       `{"1":"` + key + `"}`,
-		"BLIND_INDEX_CURRENT_VERSION": "1",
-		"TOKEN_SIGNING_KEYS_JSON":     `{"test-signing-key":"` + key + `"}`,
-		"TOKEN_ACTIVE_KEY_ID":         "test-signing-key",
-		"TOKEN_ISSUER":                "test-issuer",
+		"DEPLOYMENT_ENVIRONMENT":             "development",
+		"YDB_ENDPOINT":                       "grpc://localhost:2136",
+		"YDB_DATABASE":                       "/local",
+		"WORKLOADS_JSON":                     `[{"id":"products","token":"` + strings.Repeat("x", 32) + `","roles":["product"],"products":["linka-plays","linka-looks","linka-pictures","linka-type","linka-paperboard","linka-site","linka-tts"]}]`,
+		"PRODUCTS_JSON":                      `{"linka-plays":{"telemetry_audience":"linka-plays-metric"},"linka-looks":{"telemetry_audience":"linka-looks-metric"},"linka-pictures":{"telemetry_audience":"linka-pictures-metric"},"linka-type":{"telemetry_audience":"linka-type-metric"},"linka-paperboard":{"telemetry_audience":"linka-paperboard-metric"},"linka-site":{"telemetry_audience":"linka-site-metric"},"linka-tts":{"telemetry_audience":"linka-tts-metric"}}`,
+		"PAIRWISE_ID_KEY_BASE64":             key,
+		"EMAIL_KEY_PROVIDER":                 "local",
+		"EMAIL_LOCAL_KEKS_JSON":              `{"test-key":"` + key + `"}`,
+		"EMAIL_KEY_ACTIVE_ID":                "test-key",
+		"BLIND_INDEX_KEYS_JSON":              `{"1":"` + key + `"}`,
+		"BLIND_INDEX_CURRENT_VERSION":        "1",
+		"TOKEN_SIGNING_KEYS_JSON":            `{"test-signing-key":"` + key + `"}`,
+		"TOKEN_ACTIVE_KEY_ID":                "test-signing-key",
+		"TOKEN_ISSUER":                       "test-issuer",
+		"PUBLIC_INSTALLATION_PRODUCTS":       "linka-plays;linka-looks;linka-pictures;linka-type",
+		"PUBLIC_INSTALLATION_POLICY_VERSION": "2026-07-19-v3",
 	}
 }
 

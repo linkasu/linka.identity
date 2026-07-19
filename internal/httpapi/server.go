@@ -10,11 +10,13 @@ import (
 	"mime"
 	"net/http"
 	"runtime/debug"
+	"sync"
 	"time"
 
 	"github.com/linka-cloud/linka.identity/internal/authz"
 	"github.com/linka-cloud/linka.identity/internal/domain"
 	"github.com/linka-cloud/linka.identity/internal/ids"
+	"github.com/linka-cloud/linka.identity/internal/installationbroker"
 	"github.com/linka-cloud/linka.identity/internal/pairwise"
 	"github.com/linka-cloud/linka.identity/internal/service"
 	"github.com/linka-cloud/linka.identity/internal/store"
@@ -24,16 +26,20 @@ import (
 const maxRequestBody = 64 << 10
 
 type Server struct {
-	store         *store.Store
-	identities    *service.IdentityService
-	tokens        *token.Signer
-	authenticator *authz.Authenticator
-	pairwise      *pairwise.Generator
-	products      map[string]string
-	requireOutbox bool
-	outboxMaxAge  time.Duration
-	logger        *slog.Logger
-	now           func() time.Time
+	store               *store.Store
+	identities          *service.IdentityService
+	tokens              *token.Signer
+	authenticator       *authz.Authenticator
+	pairwise            *pairwise.Generator
+	products            map[string]string
+	publicBroker        *installationbroker.Broker
+	publicOrigins       map[string]struct{}
+	publicRequestLimit  *tokenBucket
+	publicRegisterLimit *tokenBucket
+	requireOutbox       bool
+	outboxMaxAge        time.Duration
+	logger              *slog.Logger
+	now                 func() time.Time
 }
 
 type contextKey string
@@ -42,16 +48,30 @@ const requestIDKey contextKey = "request-id"
 const principalKey contextKey = "principal"
 
 func New(database *store.Store, identities *service.IdentityService, tokens *token.Signer, authenticator *authz.Authenticator,
-	pairwiseIDs *pairwise.Generator, products map[string]string, requireOutbox bool, outboxMaxAge time.Duration, logger *slog.Logger) http.Handler {
+	pairwiseIDs *pairwise.Generator, products map[string]string, publicBroker *installationbroker.Broker, publicOrigins map[string]struct{},
+	requireOutbox bool, outboxMaxAge time.Duration, logger *slog.Logger) http.Handler {
 	server := &Server{
 		store: database, identities: identities, tokens: tokens,
 		authenticator: authenticator, pairwise: pairwiseIDs, products: products,
+		publicBroker: publicBroker, publicOrigins: publicOrigins,
 		requireOutbox: requireOutbox, outboxMaxAge: outboxMaxAge, logger: logger, now: time.Now,
+	}
+	if publicBroker != nil {
+		server.publicRequestLimit = newTokenBucket(60, time.Second)
+		server.publicRegisterLimit = newTokenBucket(6, 10*time.Second)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", server.health)
 	mux.HandleFunc("GET /readyz", server.ready)
 	mux.HandleFunc("GET /.well-known/jwks.json", server.jwks)
+	if publicBroker != nil {
+		mux.Handle("POST /v1/public/installations", server.public(http.HandlerFunc(server.registerPublicInstallation)))
+		mux.Handle("OPTIONS /v1/public/installations", server.public(http.HandlerFunc(server.publicPreflight)))
+		mux.Handle("POST /v1/public/installations/token", server.public(http.HandlerFunc(server.refreshPublicInstallationToken)))
+		mux.Handle("OPTIONS /v1/public/installations/token", server.public(http.HandlerFunc(server.publicPreflight)))
+		mux.Handle("PUT /v1/public/installations/telemetry-preference", server.public(http.HandlerFunc(server.setPublicTelemetryPreference)))
+		mux.Handle("OPTIONS /v1/public/installations/telemetry-preference", server.public(http.HandlerFunc(server.publicPreflight)))
+	}
 	mux.Handle("POST /v1/installations", server.require(authz.RoleProduct, http.HandlerFunc(server.createInstallation)))
 	mux.Handle("POST /v1/email-verifications", server.require(authz.RoleProduct, http.HandlerFunc(server.beginEmailVerification)))
 	mux.Handle("POST /v1/internal/email-verifications/{id}/verify", server.require(authz.RoleEmailVerifier, http.HandlerFunc(server.verifyEmailOwnership)))
@@ -69,6 +89,58 @@ func New(database *store.Store, identities *service.IdentityService, tokens *tok
 	mux.Handle("POST /v1/internal/organization-submissions/{id}/resolve", server.require(authz.RoleOrgAdmin, http.HandlerFunc(server.resolveOrganizationSubmission)))
 	mux.Handle("POST /v1/internal/organizations/{id}/merge", server.require(authz.RoleOrgAdmin, http.HandlerFunc(server.mergeOrganization)))
 	return server.middleware(mux)
+}
+
+type tokenBucket struct {
+	mu       sync.Mutex
+	capacity float64
+	tokens   float64
+	interval time.Duration
+	last     time.Time
+	now      func() time.Time
+}
+
+func newTokenBucket(capacity int, interval time.Duration) *tokenBucket {
+	now := time.Now
+	return &tokenBucket{capacity: float64(capacity), tokens: float64(capacity), interval: interval, last: now(), now: now}
+}
+
+func (b *tokenBucket) Allow() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := b.now()
+	b.tokens += float64(now.Sub(b.last)) / float64(b.interval)
+	if b.tokens > b.capacity {
+		b.tokens = b.capacity
+	}
+	b.last = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+func (s *Server) public(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.publicRequestLimit.Allow() {
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusTooManyRequests, errorResponse{Error: "rate_limited"})
+			return
+		}
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			if _, ok := s.publicOrigins[origin]; !ok {
+				writeJSON(w, http.StatusForbidden, errorResponse{Error: "forbidden_origin"})
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "POST, PUT, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Vary", "Origin")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
@@ -180,11 +252,15 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
+	return decodeJSONLimit(w, r, target, maxRequestBody)
+}
+
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, target any, limit int64) error {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		return domain.ErrInvalid
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {

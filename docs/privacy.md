@@ -14,6 +14,7 @@
 | Organization submission | Potentially identifying free text | YDB only |
 | Consent/privacy/preference | Sensitive compliance state | YDB only |
 | Outbox payload | Pseudonymous control event | YDB and Metric control sink |
+| Installation refresh capability | Pseudonymous signed bearer capability | Client keychain/keystore only; never YDB or logs |
 
 Email never belongs in telemetry, JWTs, logs, traces, metric labels, error messages, organization records, or outbox payloads.
 
@@ -28,6 +29,8 @@ Consumed verification ciphertext is deleted and replaced by email-free evidence 
 Donation and account namespaces have distinct blind-index keys and donation scope cannot become global. Anonymous installations need no person/account. Minor global linkage is disabled by default; age/relationship records are not proof of authority or consent.
 
 Consent and telemetry preference have no inferred default. A denial atomically emits a suppression event. Deletion fans out all relevant pairwise aliases, waits for request-ID-bound Metric completion receipts, then erases/anonymizes live YDB records. Cancellation/rejection and erasure are mutually serialized and optimistic version checks reject stale workers.
+
+Public clients can create only registry-approved anonymous installations and submit an allowlisted platform, exact policy version, explicit preference, and timestamp. The refresh capability carries only the pairwise installation key and separate Identity audience/scope. Each exchange resolves the alias and rechecks the live YDB preference before a short-lived Metrics JWT is issued. A denied subject cannot be re-enabled; later explicit consent creates a new pairwise installation while the old data remains suppressed.
 
 All LINKa products may share one Metric endpoint, but each keeps an immutable telemetry audience. Cross-product deletion fans out product/audience-specific aliases; one product's subject key is never reused as another product's analytics identifier.
 

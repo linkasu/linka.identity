@@ -29,6 +29,11 @@ type Consent struct {
 	RecordedAt    time.Time
 }
 
+type TelemetryPreference struct {
+	Preference string
+	RecordedAt time.Time
+}
+
 type PrivacyRequest struct {
 	Subject             Subject
 	SubjectKey          string
@@ -196,6 +201,29 @@ func (s *Store) SetTelemetryPreference(ctx context.Context, subject Subject, sub
 		}
 		return nil
 	})
+}
+
+func (s *Store) GetTelemetryPreference(ctx context.Context, subject Subject, productID string) (TelemetryPreference, error) {
+	row, err := s.client.QueryRow(ctx, `
+		DECLARE $subject_type AS Utf8;
+		DECLARE $subject_id AS Utf8;
+		DECLARE $product_id AS Utf8;
+		SELECT preference, recorded_at FROM telemetry_preferences
+		WHERE subject_type = $subject_type AND subject_id = $subject_id AND product_id = $product_id;`,
+		query.WithParameters(ydb.ParamsBuilder().
+			Param("$subject_type").Text(subject.Kind).
+			Param("$subject_id").Text(subject.ID).
+			Param("$product_id").Text(productID).
+			Build()),
+		query.WithTxControl(query.SnapshotReadOnlyTxControl()))
+	if err != nil {
+		return TelemetryPreference{}, noRows(err)
+	}
+	var result TelemetryPreference
+	if err := row.Scan(&result.Preference, &result.RecordedAt); err != nil {
+		return TelemetryPreference{}, err
+	}
+	return result, nil
 }
 
 func (s *Store) CreatePrivacyRequest(ctx context.Context, request PrivacyRequest, products map[string]string) (PrivacyRequestStatus, bool, error) {
