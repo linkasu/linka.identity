@@ -22,10 +22,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  license-scope:
+    name: Licensing publication guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      deploy: ${{ steps.scope.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Test licensing guard
+        run: python3 .github/scripts/licensing-deployment-guard.py --self-test
+      - id: scope
+        run: python3 .github/scripts/licensing-deployment-guard.py
+
   deploy:
+    needs: [license-scope]
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+      needs.license-scope.outputs.deploy == 'true' &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main')
+      )
     runs-on: ubuntu-latest
     environment: production-yc
     env:
