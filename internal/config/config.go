@@ -41,6 +41,7 @@ type Config struct {
 	TokenMaxTTL                time.Duration
 	PublicInstallationProducts map[string]struct{}
 	PublicPolicyVersion        string
+	PublicAdditionalPolicies   map[string]map[string]struct{}
 	PublicRefreshTTL           time.Duration
 	PublicAllowedOrigins       map[string]struct{}
 	MinorCrossProductLinking   bool
@@ -193,6 +194,20 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	cfg.PublicPolicyVersion = strings.TrimSpace(valueOrDefault(lookup, "PUBLIC_INSTALLATION_POLICY_VERSION", ""))
 	if len(cfg.PublicInstallationProducts) > 0 && (len(cfg.PublicPolicyVersion) < 1 || len(cfg.PublicPolicyVersion) > 100) {
 		return Config{}, errors.New("PUBLIC_INSTALLATION_POLICY_VERSION is required and must contain at most 100 characters")
+	}
+	cfg.PublicAdditionalPolicies = make(map[string]map[string]struct{})
+	if raw := strings.TrimSpace(valueOrDefault(lookup, "PUBLIC_INSTALLATION_ADDITIONAL_POLICIES", "")); raw != "" {
+		for _, entry := range strings.Split(raw, ";") {
+			productID, policy, ok := strings.Cut(entry, "=")
+			productID, policy = strings.TrimSpace(productID), strings.TrimSpace(policy)
+			if _, enabled := cfg.PublicInstallationProducts[productID]; !ok || !enabled || len(policy) < 1 || len(policy) > 100 {
+				return Config{}, errors.New("PUBLIC_INSTALLATION_ADDITIONAL_POLICIES must contain enabled-product=policy pairs with policies of 1 to 100 characters")
+			}
+			if cfg.PublicAdditionalPolicies[productID] == nil {
+				cfg.PublicAdditionalPolicies[productID] = make(map[string]struct{})
+			}
+			cfg.PublicAdditionalPolicies[productID][policy] = struct{}{}
+		}
 	}
 	cfg.PublicRefreshTTL, err = durationValue(lookup, "PUBLIC_INSTALLATION_REFRESH_TTL", 180*24*time.Hour)
 	if err != nil || cfg.PublicRefreshTTL < 24*time.Hour || cfg.PublicRefreshTTL > 365*24*time.Hour {

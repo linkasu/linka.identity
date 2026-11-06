@@ -64,7 +64,8 @@ TEST_YDB_ENDPOINT=grpc://127.0.0.1:2136 TEST_YDB_DATABASE=/local \
 | `TOKEN_ACTIVE_KEY_ID` | Signing key used for new JWTs. |
 | `TOKEN_ISSUER` | Exact token issuer. |
 | `PUBLIC_INSTALLATION_PRODUCTS` | Semicolon-separated closed allowlist for anonymous native-client registration; empty disables public routes. |
-| `PUBLIC_INSTALLATION_POLICY_VERSION` | Exact policy version accepted by public registration and denial. |
+| `PUBLIC_INSTALLATION_POLICY_VERSION` | Base policy version accepted by public registration. Denial preserves the credential's original policy. |
+| `PUBLIC_INSTALLATION_ADDITIONAL_POLICIES` | Optional approved `product=policy` pairs separated by semicolons; only enabled public products may be named. Does not change the base policy. |
 | `PUBLIC_INSTALLATION_REFRESH_TTL` | Signed refresh capability lifetime, from 24 hours through 365 days. |
 | `PUBLIC_INSTALLATION_ALLOWED_ORIGINS` | Optional exact HTTPS browser origins; empty keeps the broker native/server-side only. |
 

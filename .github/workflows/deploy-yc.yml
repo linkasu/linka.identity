@@ -150,6 +150,7 @@ jobs:
           YC_RUNTIME_SA_ID: ${{ secrets.YC_RUNTIME_SA_ID }}
           YC_LOCKBOX_SECRET_ID: ${{ secrets.YC_LOCKBOX_SECRET_ID }}
           YC_LOCKBOX_SECRET_VERSION_ID: ${{ secrets.YC_LOCKBOX_SECRET_VERSION_ID }}
+          PUBLIC_ADDITIONAL_POLICIES: ${{ vars.PUBLIC_INSTALLATION_ADDITIONAL_POLICIES }}
         run: |
           "$HOME/yandex-cloud/bin/yc" serverless container revision deploy \
             --container-name linka-identity \
@@ -157,6 +158,7 @@ jobs:
             --cores 1 --memory 512M --execution-timeout 30s --concurrency 16 \
             --service-account-id "$YC_RUNTIME_SA_ID" \
             --environment "HTTP_ADDR=:8080,DEPLOYMENT_ENVIRONMENT=production,YDB_ENDPOINT=${{ vars.YDB_ENDPOINT }},YDB_DATABASE=${{ vars.YDB_DATABASE }},YDB_METADATA_CREDENTIALS=1,EMAIL_KEY_PROVIDER=yandex-kms,EMAIL_KEY_ACTIVE_ID=${{ vars.EMAIL_KEY_ACTIVE_ID }},BLIND_INDEX_CURRENT_VERSION=${{ vars.BLIND_INDEX_CURRENT_VERSION }},TOKEN_ACTIVE_KEY_ID=${{ vars.TOKEN_ACTIVE_KEY_ID }},TOKEN_ISSUER=${{ vars.TOKEN_ISSUER }},PUBLIC_INSTALLATION_PRODUCTS=${{ vars.PUBLIC_INSTALLATION_PRODUCTS }},PUBLIC_INSTALLATION_POLICY_VERSION=${{ vars.PUBLIC_INSTALLATION_POLICY_VERSION }},PUBLIC_INSTALLATION_REFRESH_TTL=4320h,REQUIRE_OUTBOX_DELIVERY=true,OUTBOX_DELIVERY_URL=${{ vars.METRIC_PRIVACY_URL }}" \
+            --environment "PUBLIC_INSTALLATION_ADDITIONAL_POLICIES=$PUBLIC_ADDITIONAL_POLICIES" \
             --secret "environment-variable=WORKLOADS_JSON,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=workloads_json" \
             --secret "environment-variable=PRODUCTS_JSON,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=products_json" \
             --secret "environment-variable=PAIRWISE_ID_KEY_BASE64,id=$YC_LOCKBOX_SECRET_ID,version-id=$YC_LOCKBOX_SECRET_VERSION_ID,key=pairwise_id_key_base64" \
@@ -192,6 +194,11 @@ jobs:
             --request POST "$IDENTITY_PUBLIC_URL/v1/public/installations" \
             --header 'Content-Type: application/json' --data '{}')"
           test "$status" = 400
+      - name: Verify Looks registration, refresh, ingest and denial
+        env:
+          IDENTITY_URL: ${{ vars.IDENTITY_PUBLIC_URL }}
+          METRIC_URL: https://metrics.nkolinka.ru
+        run: python3 scripts/looks-telemetry-smoke.py
       - name: Roll back failed production update
         if: failure() && steps.rollback.outcome == 'success'
         run: |

@@ -2,6 +2,28 @@
 
 ## Startup and readiness
 
+### Looks telemetry compatibility
+
+Keep `PUBLIC_INSTALLATION_POLICY_VERSION=2026-07-19-v3` and set the non-secret
+`PUBLIC_INSTALLATION_ADDITIONAL_POLICIES=linka-looks=2026-07-22-v3` after approval of
+the client consent text. Registration stores and signs the original policy; no
+consents, audiences, identities, or schema are migrated. Do not extend
+`PRODUCTS_JSON` for this setting: older binaries strictly decode that JSON.
+
+Looks refresh responses include the original nested `metrics_token` plus matching
+top-level token fields for existing Looks clients. Other products retain their
+response shape. Existing credentials remain refreshable and revocable after a
+registration policy is retired; denial never silently grants consent again.
+
+`IDENTITY_URL=https://api.identity.linka.su METRIC_URL=https://metrics.nkolinka.ru
+python3 scripts/looks-telemetry-smoke.py` creates isolated canary events and then
+denies their installation. Run only on an authorized target. It does not log
+credentials or installation keys. Verify the reported record IDs in ClickHouse
+before suppression if checking DataLens visibility; suppression is not deletion.
+The deployment runs this functional check and rolls back on failure. A rollback
+restores the prior revision/configuration without deleting newly written consent;
+Looks compatibility can stop working again on the old binary.
+
 Run `schema` as a one-shot step before starting a new application revision. It is safe to rerun: every DDL statement is idempotent and the `schema_meta` version must equal the binary's version. `/healthz` reports process liveness. `/readyz` verifies YDB access, schema version, and, when required, outbox age/DLQ state.
 
 Use `REQUIRE_OUTBOX_DELIVERY=true` in production. Configuration then requires an HTTPS Metric privacy URL; delivery uses a short-lived Identity-signed `privacy:write` JWT.
