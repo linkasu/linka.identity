@@ -10,7 +10,7 @@ import (
 	"github.com/ydb-platform/ydb-go-sdk/v3/query"
 )
 
-const Version = uint64(1)
+const Version = uint64(2)
 
 var statements = []string{
 	`CREATE TABLE IF NOT EXISTS schema_meta (
@@ -300,13 +300,13 @@ func Apply(ctx context.Context, db Executor, now time.Time) error {
 		SELECT version FROM schema_meta WHERE name = $name;`,
 		query.WithParameters(ydb.ParamsBuilder().Param("$name").Text("identity").Build()),
 		query.WithTxControl(query.SnapshotReadOnlyTxControl()))
+	var current uint64
 	if err == nil {
-		var version uint64
-		if err := row.Scan(&version); err != nil {
+		if err := row.Scan(&current); err != nil {
 			return fmt.Errorf("scan YDB schema version: %w", err)
 		}
-		if version != Version {
-			return fmt.Errorf("YDB schema version is %d, binary requires %d", version, Version)
+		if current != 1 && current != Version {
+			return fmt.Errorf("YDB schema version is %d, binary requires %d", current, Version)
 		}
 	} else if !errors.Is(err, query.ErrNoRows) {
 		return fmt.Errorf("read YDB schema version: %w", err)
@@ -317,7 +317,12 @@ func Apply(ctx context.Context, db Executor, now time.Time) error {
 			return fmt.Errorf("apply YDB schema statement %d: %w", i+2, err)
 		}
 	}
-	if err == nil {
+	for i, statement := range publicAccountStatements {
+		if err := db.Exec(ctx, statement, query.WithTxControl(query.ImplicitTxControl())); err != nil {
+			return fmt.Errorf("apply public account schema statement %d: %w", i+1, err)
+		}
+	}
+	if current == Version {
 		return nil
 	}
 
@@ -325,7 +330,7 @@ func Apply(ctx context.Context, db Executor, now time.Time) error {
 		DECLARE $name AS Utf8;
 		DECLARE $version AS Uint64;
 		DECLARE $applied_at AS Timestamp;
-		INSERT INTO schema_meta (name, version, applied_at)
+		UPSERT INTO schema_meta (name, version, applied_at)
 		VALUES ($name, $version, $applied_at);`,
 		query.WithParameters(ydb.ParamsBuilder().
 			Param("$name").Text("identity").

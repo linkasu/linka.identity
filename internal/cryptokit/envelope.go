@@ -73,11 +73,17 @@ func (e *Envelope) Decrypt(ctx context.Context, encrypted Ciphertext, aad []byte
 	if encrypted.Algorithm != Algorithm {
 		return nil, errors.New("unsupported envelope algorithm")
 	}
+	if encrypted.KeyID == "" || len(encrypted.WrappedDataKey) == 0 || len(encrypted.Nonce) != 12 || len(encrypted.Data) < 16 {
+		return nil, errors.New("invalid envelope metadata")
+	}
 	dataKey, err := e.provider.DecryptDataKey(ctx, encrypted.KeyID, encrypted.WrappedDataKey)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt data key: %w", err)
 	}
 	defer clear(dataKey)
+	if len(dataKey) != 32 {
+		return nil, errors.New("invalid data key")
+	}
 	block, err := aes.NewCipher(dataKey)
 	if err != nil {
 		return nil, errors.New("invalid data key")

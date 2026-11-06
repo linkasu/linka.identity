@@ -23,6 +23,7 @@ type Product struct {
 type Config struct {
 	Environment                string
 	HTTPAddr                   string
+	MaintenanceMode            bool
 	YDBEndpoint                string
 	YDBDatabase                string
 	Workloads                  []authz.Workload
@@ -40,6 +41,7 @@ type Config struct {
 	TokenTTL                   time.Duration
 	TokenMaxTTL                time.Duration
 	PublicInstallationProducts map[string]struct{}
+	PublicAccounts             PublicAccountConfig
 	PublicPolicyVersion        string
 	PublicAdditionalPolicies   map[string]map[string]struct{}
 	PublicRefreshTTL           time.Duration
@@ -68,6 +70,13 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, errors.New("DEPLOYMENT_ENVIRONMENT must be development or production")
 	}
 	cfg.HTTPAddr = valueOrDefault(lookup, "HTTP_ADDR", ":8080")
+	cfg.MaintenanceMode, err = boolValue(lookup, "IDENTITY_MAINTENANCE_MODE", false)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.MaintenanceMode {
+		return cfg, nil
+	}
 	cfg.YDBEndpoint, err = required(lookup, "YDB_ENDPOINT")
 	if err != nil {
 		return Config{}, err
@@ -267,6 +276,10 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, errors.New("SHUTDOWN_TIMEOUT must be a positive duration")
 	}
 
+	cfg.PublicAccounts, err = loadPublicAccounts(lookup, cfg.Products, cfg.PublicInstallationProducts, cfg.TokenMaxTTL)
+	if err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
 }
 

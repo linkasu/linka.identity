@@ -31,6 +31,9 @@ type PublicTelemetryDenial struct {
 }
 
 func (s *Store) RegisterPublicInstallation(ctx context.Context, input PublicInstallationRegistration) (Installation, error) {
+	if !validPublicInstallationConsent(input) {
+		return Installation{}, domain.ErrInvalid
+	}
 	now := s.now().UTC().Truncate(time.Microsecond)
 	result := input.Installation
 	preferenceID, err := ids.NewUUID()
@@ -118,10 +121,13 @@ func (s *Store) RegisterPublicInstallation(ctx context.Context, input PublicInst
 				Build())); err != nil {
 			return err
 		}
-		if err := insertConsentWith(ctx, tx, input.Consent, now); err != nil {
-			return err
+		if input.Preference != "unknown" {
+			if err := insertConsentWith(ctx, tx, input.Consent, now); err != nil {
+				return err
+			}
 		}
-		if err := insertTelemetryPreferenceWith(ctx, tx, input.Consent.Subject, input.Installation.ProductID,
+		subject := Subject{Kind: "installation", ID: input.Installation.ID}
+		if err := insertTelemetryPreferenceWith(ctx, tx, subject, input.Installation.ProductID,
 			preferenceID, input.Preference, input.PreferenceAt, now); err != nil {
 			return err
 		}
@@ -137,6 +143,28 @@ func (s *Store) RegisterPublicInstallation(ctx context.Context, input PublicInst
 		result.CreatedAt = now
 	}
 	return result, nil
+}
+
+func validPublicInstallationConsent(input PublicInstallationRegistration) bool {
+	if !domain.ValidUUID(input.Installation.ID) || !domain.ValidProductID(input.Installation.ProductID) || input.PreferenceAt.IsZero() {
+		return false
+	}
+	if input.Preference == "unknown" {
+		return input.Consent == (Consent{}) && input.SuppressionID == ""
+	}
+	status := "granted"
+	if input.Preference == "denied" {
+		status = "withdrawn"
+		if !domain.ValidUUID(input.SuppressionID) {
+			return false
+		}
+	} else if input.Preference != "allowed" {
+		return false
+	}
+	consent := input.Consent
+	return domain.ValidUUID(consent.ID) && consent.Subject == (Subject{Kind: "installation", ID: input.Installation.ID}) &&
+		consent.ProductID == input.Installation.ProductID && consent.ConsentType == "telemetry" && consent.Status == status &&
+		len(consent.PolicyVersion) >= 1 && len(consent.PolicyVersion) <= 100 && consent.RecordedAt.Equal(input.PreferenceAt)
 }
 
 func (s *Store) DenyPublicInstallation(ctx context.Context, input PublicTelemetryDenial) (time.Time, error) {

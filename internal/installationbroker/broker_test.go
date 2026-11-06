@@ -157,7 +157,7 @@ func TestBrokerAdditionalPolicyIsScopedAndPreserved(t *testing.T) {
 				t.Fatal("registration replay created another installation")
 			}
 			for _, invalid := range []RegisterInput{
-				{RequestID: input.RequestID, ProductID: test.product, Platform: "windows", Preference: "unknown", PolicyVersion: test.policy, RecordedAt: now},
+				{RequestID: input.RequestID, ProductID: test.product, Platform: "windows", Preference: "invalid", PolicyVersion: test.policy, RecordedAt: now},
 				{RequestID: input.RequestID, ProductID: test.product, Platform: "windows", Preference: "allowed", PolicyVersion: test.policy, RecordedAt: now.Add(-25 * time.Hour)},
 			} {
 				if _, err := broker.Register(context.Background(), invalid); !errors.Is(err, domain.ErrInvalid) {

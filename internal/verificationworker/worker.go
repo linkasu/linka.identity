@@ -33,7 +33,11 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 func (w *Worker) Process(ctx context.Context) error {
-	_, err := w.store.DeleteExpiredEmailVerifications(ctx, time.Now().UTC(), 100)
+	now := time.Now().UTC()
+	err := w.store.CleanupPublicAccountState(ctx, now, 100)
+	if err == nil {
+		_, err = w.store.DeleteExpiredEmailVerifications(ctx, now, 100)
+	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		w.logger.Error("expired email verification cleanup failed")
 	}

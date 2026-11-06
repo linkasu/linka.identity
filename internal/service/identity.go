@@ -2,9 +2,7 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net/mail"
 	"strings"
 	"time"
 
@@ -75,43 +73,15 @@ type BeginEmailVerificationInput struct {
 }
 
 func (s *IdentityService) BeginEmailVerification(ctx context.Context, input BeginEmailVerificationInput) (string, time.Time, error) {
-	normalizedEmail, err := normalizeEmail(input.Email)
-	if err != nil {
-		return "", time.Time{}, domain.ErrInvalid
-	}
-	registration := RegisterEmailIdentityInput{
-		ProductID: input.ProductID, Email: normalizedEmail, Namespace: input.Namespace, AgeCategory: input.AgeCategory,
-		GuardianRelationship: input.GuardianRelationship, LinkAcrossProducts: input.LinkAcrossProducts, InstallationID: input.InstallationID,
-		VerifiedAt: s.now().UTC(),
-	}
-	if err := s.validateRegistration(registration); err != nil {
-		return "", time.Time{}, err
-	}
-	linkageScope, scopeKey, err := s.linkageScope(registration)
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	verificationID, err := ids.NewUUID()
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	indexMessage := []byte(strings.Join([]string{input.Namespace, linkageScope, scopeKey, normalizedEmail}, "\x00"))
-	index := s.indexer.Current(indexMessage)
-	aad := []byte(strings.Join([]string{"email-verification-v1", verificationID, input.ProductID}, "\x00"))
-	encrypted, err := s.envelope.Encrypt(ctx, []byte(normalizedEmail), aad)
-	if err != nil {
-		return "", time.Time{}, err
-	}
 	expiresAt := s.now().UTC().Add(s.emailVerificationTTL)
-	if err := s.store.CreateEmailVerification(ctx, store.EmailVerification{
-		ID: verificationID, ProductID: input.ProductID, InstallationID: input.InstallationID,
-		Namespace: input.Namespace, AgeCategory: input.AgeCategory, GuardianRelationship: input.GuardianRelationship,
-		LinkAcrossProducts: input.LinkAcrossProducts, BlindIndexVersion: index.Version, BlindIndex: index.Value,
-		EncryptedEmail: encrypted, ExpiresAt: expiresAt,
-	}); err != nil {
+	verification, err := s.prepareEmailVerification(ctx, input, "", expiresAt)
+	if err != nil {
 		return "", time.Time{}, err
 	}
-	return verificationID, expiresAt, nil
+	if err := s.store.CreateEmailVerification(ctx, verification); err != nil {
+		return "", time.Time{}, err
+	}
+	return verification.ID, verification.ExpiresAt, nil
 }
 
 func (s *IdentityService) CompleteEmailVerification(ctx context.Context, verificationID, productID string, createAccount bool) (RegisterEmailIdentityResult, error) {
@@ -168,7 +138,7 @@ func (s *IdentityService) RegisterEmailIdentity(ctx context.Context, input Regis
 }
 
 func (s *IdentityService) prepareEmailIdentity(ctx context.Context, input RegisterEmailIdentityInput) (store.NewEmailIdentity, []cryptokit.BlindIndex, error) {
-	normalizedEmail, err := normalizeEmail(input.Email)
+	normalizedEmail, err := domain.NormalizeEmail(input.Email)
 	if err != nil {
 		return store.NewEmailIdentity{}, nil, domain.ErrInvalid
 	}
@@ -193,7 +163,7 @@ func (s *IdentityService) prepareEmailIdentity(ctx context.Context, input Regist
 	if err != nil {
 		return store.NewEmailIdentity{}, nil, err
 	}
-	aad := []byte(strings.Join([]string{"email-v1", identityID, input.Namespace, linkageScope, scopeKey}, "\x00"))
+	aad := cryptokit.EmailIdentityAAD(identityID, input.Namespace, linkageScope, scopeKey)
 	encrypted, err := s.envelope.Encrypt(ctx, []byte(normalizedEmail), aad)
 	if err != nil {
 		return store.NewEmailIdentity{}, nil, err
@@ -254,16 +224,4 @@ func (s *IdentityService) linkageScope(input RegisterEmailIdentityInput) (string
 		return "", "", domain.ErrForbidden
 	}
 	return "global", "global", nil
-}
-
-func normalizeEmail(raw string) (string, error) {
-	trimmed := strings.TrimSpace(raw)
-	if len(trimmed) < 3 || len(trimmed) > 320 || !strings.Contains(trimmed, "@") {
-		return "", errors.New("invalid email")
-	}
-	parsed, err := mail.ParseAddress(trimmed)
-	if err != nil || parsed.Address != trimmed || strings.ContainsAny(trimmed, "\r\n\x00") {
-		return "", errors.New("invalid email")
-	}
-	return strings.ToLower(parsed.Address), nil
 }

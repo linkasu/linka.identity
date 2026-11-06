@@ -7,6 +7,112 @@ x-yc-apigateway:
     allRequests:
       rps: 20
 paths:
+  /v1/public/installations:
+    post:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+    options:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+  /v1/public/installations/token:
+    post:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+    options:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+  /v1/public/installations/telemetry-preference:
+    put:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+    options:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+  /v1/public/email/challenges:
+    post:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+    options:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+  /v1/public/email/challenges/{id}/verify:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+    options:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+  /v1/public/account-sessions/refresh:
+    post:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+    options:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+  /v1/public/account-sessions/revoke:
+    post:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+    options:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+  /v1/public/account-profile:
+    put:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+    options:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+  /v1/internal/product-directory/query:
+    post:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
+  /v1/internal/product-directory/check:
+    post:
+      x-yc-apigateway-integration:
+        type: serverless_containers
+        container_id: bba5elvbsqmekuv80l8l
+        service_account_id: aje4rl2smbvtrrtshvc4
   /internal/workers/tick:
     x-yc-apigateway-any-method:
       x-yc-apigateway-integration:

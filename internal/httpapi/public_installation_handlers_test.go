@@ -74,7 +74,7 @@ func TestRefreshPublicInstallationToken(t *testing.T) {
 			if test.invalid {
 				credential = "invalid"
 			}
-			handler := New(nil, nil, signer, nil, pairwiseIDs, nil, broker, nil, false, time.Minute, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			handler := New(nil, nil, signer, nil, pairwiseIDs, nil, broker, nil, nil, nil, false, time.Minute, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			request := httptest.NewRequest(http.MethodPost, "/v1/public/installations/token", strings.NewReader("{}"))
 			request.Header.Set("Content-Type", "application/json")
 			request.Header.Set("Authorization", "Bearer "+credential)
