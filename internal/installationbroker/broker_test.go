@@ -109,6 +109,76 @@ func TestBrokerRejectsUnregisteredProductAndUnsafeReenable(t *testing.T) {
 	}
 }
 
+func TestBrokerAdditionalPolicyIsScopedAndPreserved(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	signer, _ := token.NewSigner(bytes.Repeat([]byte{1}, 32), "active", "issuer", time.Minute, 15*time.Minute)
+	pairwiseIDs, _ := pairwise.New(bytes.Repeat([]byte{2}, 32))
+	for _, test := range []struct {
+		product, policy string
+		valid           bool
+	}{
+		{"linka-looks", "2026-07-22-v3", true},
+		{"linka-looks", "2026-07-19-v3", true},
+		{"linka-plays", "2026-07-19-v3", true},
+		{"linka-plays", "2026-07-22-v3", false},
+		{"linka-looks", "unknown", false},
+	} {
+		t.Run(test.product+"/"+test.policy, func(t *testing.T) {
+			repository := newFakeRepository()
+			broker, err := New(repository, signer, pairwiseIDs, Config{
+				Products: map[string]Product{
+					"linka-looks": {Audience: "looks-metric", AdditionalPolicies: map[string]struct{}{"2026-07-22-v3": {}}},
+					"linka-plays": {Audience: "plays-metric"},
+				},
+				RegistrationProducts: map[string]struct{}{"linka-looks": {}, "linka-plays": {}},
+				PolicyVersion:        "2026-07-19-v3", RefreshTTL: 24 * time.Hour,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			broker.now = func() time.Time { return now }
+			input := RegisterInput{RequestID: "11111111-1111-4111-8111-111111111111", ProductID: test.product, Platform: "windows", Preference: "allowed", PolicyVersion: test.policy, RecordedAt: now}
+			registered, err := broker.Register(context.Background(), input)
+			if !test.valid {
+				if !errors.Is(err, domain.ErrInvalid) || repository.registrations != 0 {
+					t.Fatalf("invalid policy wrote an installation: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			claims, err := signer.VerifyRefresh(registered.RefreshToken)
+			if err != nil || claims.PolicyVersion != test.policy || registered.PolicyVersion != test.policy || repository.consent.PolicyVersion != test.policy {
+				t.Fatal("policy was not preserved")
+			}
+			replayed, err := broker.Register(context.Background(), input)
+			if err != nil || replayed.InstallationKey != registered.InstallationKey || repository.registrations != 1 {
+				t.Fatal("registration replay created another installation")
+			}
+			for _, invalid := range []RegisterInput{
+				{RequestID: input.RequestID, ProductID: test.product, Platform: "windows", Preference: "unknown", PolicyVersion: test.policy, RecordedAt: now},
+				{RequestID: input.RequestID, ProductID: test.product, Platform: "windows", Preference: "allowed", PolicyVersion: test.policy, RecordedAt: now.Add(-25 * time.Hour)},
+			} {
+				if _, err := broker.Register(context.Background(), invalid); !errors.Is(err, domain.ErrInvalid) {
+					t.Fatal("additional policy bypassed preference or time validation")
+				}
+			}
+			broker.config.PolicyVersion = "retired"
+			broker.config.Products[test.product] = Product{Audience: broker.config.Products[test.product].Audience}
+			if _, err := broker.Refresh(context.Background(), registered.RefreshToken); err != nil {
+				t.Fatalf("policy retirement broke an existing credential: %v", err)
+			}
+			if _, err := broker.SetPreference(context.Background(), registered.RefreshToken, PreferenceInput{Preference: "denied", PolicyVersion: test.policy, RecordedAt: now.Add(time.Second)}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := broker.Refresh(context.Background(), registered.RefreshToken); !errors.Is(err, domain.ErrForbidden) {
+				t.Fatalf("refresh after denial: %v", err)
+			}
+		})
+	}
+}
+
 func TestBrokerDoesNotMaskRepositoryFailures(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	repository := newFakeRepository()
@@ -138,6 +208,7 @@ func TestBrokerDoesNotMaskRepositoryFailures(t *testing.T) {
 }
 
 type fakeRepository struct {
+	consent       store.Consent
 	installation  store.Installation
 	aliases       map[string]store.ResolvedAlias
 	preferences   map[string]store.TelemetryPreference
@@ -158,6 +229,7 @@ func (f *fakeRepository) RegisterPublicInstallation(_ context.Context, input sto
 	input.Installation.CreatedAt = time.Now().UTC()
 	f.installation = input.Installation
 	f.registrations++
+	f.consent = input.Consent
 	f.aliases[input.OpaqueKey] = store.ResolvedAlias{
 		OpaqueKey: input.OpaqueKey, ProductID: input.Installation.ProductID, Audience: input.Audience,
 		SubjectType: "installation", SubjectID: input.Installation.ID,

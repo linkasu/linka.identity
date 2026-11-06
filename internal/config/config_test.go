@@ -56,6 +56,34 @@ func TestLoadRejectsUnknownPublicProductAndUnsafeOrigin(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidAdditionalPublicPolicies(t *testing.T) {
+	for _, raw := range []string{
+		"linka-looks", "linka-looks=", "=2026-07-22-v3",
+		"unknown=2026-07-22-v3", "linka-tts=2026-07-22-v3",
+		"linka-looks=" + strings.Repeat("x", 101),
+	} {
+		t.Run(raw, func(t *testing.T) {
+			values := validValues(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+			values["PUBLIC_INSTALLATION_ADDITIONAL_POLICIES"] = raw
+			if _, err := load(mapLookup(values)); err == nil || !strings.Contains(err.Error(), "PUBLIC_INSTALLATION_ADDITIONAL_POLICIES") {
+				t.Fatalf("invalid additional policies accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadAdditionalPublicPoliciesAreProductScoped(t *testing.T) {
+	values := validValues(base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	values["PUBLIC_INSTALLATION_ADDITIONAL_POLICIES"] = "linka-looks=2026-07-22-v3"
+	cfg, err := load(mapLookup(values))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.PublicAdditionalPolicies["linka-looks"]["2026-07-22-v3"]; !ok || len(cfg.PublicAdditionalPolicies) != 1 || cfg.PublicPolicyVersion != "2026-07-19-v3" {
+		t.Fatal("additional policy changed the base policy or another product")
+	}
+}
+
 func TestLoadRejectsWorkloadWithUnknownProduct(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	values := validValues(key)

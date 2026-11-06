@@ -117,7 +117,7 @@ func run(logger *slog.Logger) error {
 	if len(cfg.PublicInstallationProducts) > 0 {
 		publicProducts := make(map[string]installationbroker.Product, len(products))
 		for productID := range products {
-			publicProducts[productID] = installationbroker.Product{Audience: products[productID]}
+			publicProducts[productID] = installationbroker.Product{Audience: products[productID], AdditionalPolicies: cfg.PublicAdditionalPolicies[productID]}
 		}
 		publicBroker, err = installationbroker.New(database, tokenSigner, pairwiseIDs, installationbroker.Config{
 			Products: publicProducts, RegistrationProducts: cfg.PublicInstallationProducts,

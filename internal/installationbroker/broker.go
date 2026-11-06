@@ -25,7 +25,8 @@ type Repository interface {
 }
 
 type Product struct {
-	Audience string
+	Audience           string
+	AdditionalPolicies map[string]struct{}
 }
 
 type Config struct {
@@ -111,7 +112,7 @@ func New(repository Repository, signer *token.Signer, pairwiseIDs *pairwise.Gene
 func (b *Broker) Register(ctx context.Context, input RegisterInput) (Registration, error) {
 	product, ok := b.config.Products[input.ProductID]
 	_, registrationEnabled := b.config.RegistrationProducts[input.ProductID]
-	if !ok || !registrationEnabled || !domain.ValidUUID(input.RequestID) || !validPlatform(input.Platform) || !b.validRegistration(input.Preference, input.PolicyVersion, input.RecordedAt) {
+	if !ok || !registrationEnabled || !domain.ValidUUID(input.RequestID) || !validPlatform(input.Platform) || !b.validRegistration(product, input.Preference, input.PolicyVersion, input.RecordedAt) {
 		return Registration{}, domain.ErrInvalid
 	}
 	input.RecordedAt = input.RecordedAt.UTC().Truncate(time.Microsecond)
@@ -259,9 +260,10 @@ func (b *Broker) issueAccess(productID, audience, installationKey string) (Acces
 	return AccessToken{AccessToken: encoded, TokenType: "Bearer", ExpiresAt: expiresAt}, nil
 }
 
-func (b *Broker) validRegistration(preference, policyVersion string, recordedAt time.Time) bool {
+func (b *Broker) validRegistration(product Product, preference, policyVersion string, recordedAt time.Time) bool {
 	now := b.now().UTC()
-	return (preference == "allowed" || preference == "denied") && policyVersion == b.config.PolicyVersion &&
+	_, additional := product.AdditionalPolicies[policyVersion]
+	return (preference == "allowed" || preference == "denied") && (policyVersion == b.config.PolicyVersion || additional) &&
 		!recordedAt.IsZero() && !recordedAt.Before(now.Add(-24*time.Hour)) && !recordedAt.After(now.Add(5*time.Minute))
 }
 

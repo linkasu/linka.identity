@@ -54,6 +54,13 @@ func (s *Server) refreshPublicInstallationToken(w http.ResponseWriter, r *http.R
 		s.fail(w, r, err)
 		return
 	}
+	if result.Product == "linka-looks" {
+		writeJSON(w, http.StatusOK, struct {
+			installationbroker.TokenResponse
+			*installationbroker.AccessToken
+		}{result, &result.MetricsToken})
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 

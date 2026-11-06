@@ -1,5 +1,6 @@
 services:
   ydb:
+    hostname: localhost
     image: cr.yandex/yc/yandex-docker-local-ydb@sha256:5ffb7860784d5517f60b6cf9fdf641b964395ed642d818e2b3d892259e155af9
     platform: linux/amd64
     environment:
@@ -11,7 +12,7 @@ services:
       - "127.0.0.1:2136:2136"
       - "127.0.0.1:8765:8765"
     healthcheck:
-      test: ["CMD-SHELL", "curl --fail --silent http://localhost:8765/ >/dev/null"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/2136"]
       interval: 2s
       timeout: 3s
       retries: 30

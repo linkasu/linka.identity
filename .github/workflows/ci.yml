@@ -38,7 +38,7 @@ jobs:
           test -n "$ydb_host"
           printf '127.0.0.1 %s\n' "$ydb_host" | sudo tee -a /etc/hosts >/dev/null
           for attempt in $(seq 1 60); do
-            curl --fail --silent http://127.0.0.1:8765/ >/dev/null && exit 0
+            (exec 3<>/dev/tcp/127.0.0.1/2136) 2>/dev/null && exit 0
             sleep 2
           done
           exit 1
@@ -47,3 +47,4 @@ jobs:
       - run: go vet ./...
       - run: go build ./...
       - run: sh -n staging-preflight.sh
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py'

@@ -716,6 +716,16 @@ components:
           $ref: "#/components/schemas/ProductID"
         metrics_token:
           $ref: "#/components/schemas/PublicAccessToken"
+        access_token:
+          type: string
+          description: Looks-only compatibility field; identical to metrics_token.access_token for authenticated product linka-looks.
+        token_type:
+          const: Bearer
+          description: Looks-only compatibility field; identical to metrics_token.token_type for authenticated product linka-looks.
+        expires_at:
+          type: string
+          format: date-time
+          description: Looks-only compatibility field; identical to metrics_token.expires_at for authenticated product linka-looks.
     PublicPreferenceRequest:
       type: object
       additionalProperties: false
