@@ -93,9 +93,12 @@ jobs:
         run: |
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
           printf '%s' "$YC_SA_KEY_JSON" | docker login cr.yandex --username json_key --password-stdin
-          docker buildx imagetools create \
-            --tag "cr.yandex/$YC_REGISTRY_ID/linka-identity:$IMAGE_TAG" \
-            "ghcr.io/linkasu/linka.identity:$IMAGE_TAG"
+          # YC rejects BuildKit attestation manifests; provenance stays in GHCR.
+          source="ghcr.io/linkasu/linka.identity:$IMAGE_TAG"
+          target="cr.yandex/$YC_REGISTRY_ID/linka-identity:$IMAGE_TAG"
+          docker pull --platform linux/amd64 "$source"
+          docker tag "$source" "$target"
+          docker push --platform linux/amd64 "$target"
           digest="$(docker buildx imagetools inspect \
             "cr.yandex/$YC_REGISTRY_ID/linka-identity:$IMAGE_TAG" \
             --format '{{json .Manifest.Digest}}' | jq -er '.')"
