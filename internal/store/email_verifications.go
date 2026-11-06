@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"time"
@@ -10,6 +11,8 @@ import (
 	"github.com/ydb-platform/ydb-go-sdk/v3"
 	"github.com/ydb-platform/ydb-go-sdk/v3/query"
 )
+
+const EmailVerificationClaimLease = 5 * time.Minute
 
 type EmailVerification struct {
 	ID                   string
@@ -194,26 +197,31 @@ func (s *Store) ClaimVerifiedEmail(ctx context.Context, id, productID, claimToke
 
 func (s *Store) ConsumeEmailVerification(ctx context.Context, id, claimToken, personID string, now time.Time) error {
 	return s.serializable(ctx, func(ctx context.Context, tx query.TxActor) error {
-		row, err := tx.QueryRow(ctx, `
+		return consumeEmailVerificationTx(ctx, tx, id, claimToken, personID, now)
+	})
+}
+
+func consumeEmailVerificationTx(ctx context.Context, tx query.TxActor, id, claimToken, personID string, now time.Time) error {
+	row, err := tx.QueryRow(ctx, `
 			DECLARE $id AS Utf8;
 			SELECT installation_id, product_id, verified_by, evidence_id, verified_at,
 			       processing_token, version
 			FROM email_verifications WHERE id = $id;`,
-			query.WithParameters(ydb.ParamsBuilder().Param("$id").Text(id).Build()))
-		if err != nil {
-			return noRows(err)
-		}
-		var installationID, verifiedBy, evidenceID, storedClaim *string
-		var productID string
-		var verifiedAt *time.Time
-		var version uint64
-		if err := row.Scan(&installationID, &productID, &verifiedBy, &evidenceID, &verifiedAt, &storedClaim, &version); err != nil {
-			return err
-		}
-		if storedClaim == nil || *storedClaim != claimToken || verifiedAt == nil || verifiedBy == nil || evidenceID == nil {
-			return domain.ErrNotFound
-		}
-		if err := tx.Exec(ctx, `
+		query.WithParameters(ydb.ParamsBuilder().Param("$id").Text(id).Build()))
+	if err != nil {
+		return noRows(err)
+	}
+	var installationID, verifiedBy, evidenceID, storedClaim *string
+	var productID string
+	var verifiedAt *time.Time
+	var version uint64
+	if err := row.Scan(&installationID, &productID, &verifiedBy, &evidenceID, &verifiedAt, &storedClaim, &version); err != nil {
+		return err
+	}
+	if storedClaim == nil || *storedClaim != claimToken || verifiedAt == nil || verifiedBy == nil || evidenceID == nil {
+		return domain.ErrNotFound
+	}
+	if err := tx.Exec(ctx, `
 			DECLARE $verification_id AS Utf8;
 			DECLARE $person_id AS Utf8;
 			DECLARE $installation_id AS Utf8?;
@@ -229,26 +237,106 @@ func (s *Store) ConsumeEmailVerification(ctx context.Context, id, claimToken, pe
 				$verification_id, $person_id, $installation_id, $product_id,
 				$verified_by, $evidence_id, $verified_at, $consumed_at
 			);`, query.WithParameters(ydb.ParamsBuilder().
-			Param("$verification_id").Text(id).
-			Param("$person_id").Text(personID).
-			Param("$installation_id").Any(nullableText(installationID)).
-			Param("$product_id").Text(productID).
-			Param("$verified_by").Text(*verifiedBy).
-			Param("$evidence_id").Text(*evidenceID).
-			Param("$verified_at").Timestamp(verifiedAt.UTC()).
-			Param("$consumed_at").Timestamp(now.UTC()).
-			Build())); err != nil {
-			return err
-		}
-		return tx.Exec(ctx, `
+		Param("$verification_id").Text(id).
+		Param("$person_id").Text(personID).
+		Param("$installation_id").Any(nullableText(installationID)).
+		Param("$product_id").Text(productID).
+		Param("$verified_by").Text(*verifiedBy).
+		Param("$evidence_id").Text(*evidenceID).
+		Param("$verified_at").Timestamp(verifiedAt.UTC()).
+		Param("$consumed_at").Timestamp(now.UTC()).
+		Build())); err != nil {
+		return err
+	}
+	return tx.Exec(ctx, `
 			DECLARE $id AS Utf8;
 			DECLARE $version AS Uint64;
 			DELETE FROM email_verifications WHERE id = $id AND version = $version;`,
-			query.WithParameters(ydb.ParamsBuilder().
-				Param("$id").Text(id).
-				Param("$version").Uint64(version).
-				Build()))
+		query.WithParameters(ydb.ParamsBuilder().
+			Param("$id").Text(id).
+			Param("$version").Uint64(version).
+			Build()))
+}
+
+func (s *Store) RegisterVerifiedEmailIdentity(ctx context.Context, verificationID, productID, claimToken string, identity NewEmailIdentity, indexes []cryptokit.BlindIndex) (EmailIdentity, bool, error) {
+	var result EmailIdentity
+	var created bool
+	err := s.serializable(ctx, func(ctx context.Context, tx query.TxActor) error {
+		result, created = EmailIdentity{}, false
+		now := s.now().UTC()
+		verification := EmailVerification{ID: verificationID}
+		var indexVersion uint64
+		var storedClaim *string
+		var processingAt *time.Time
+		row, err := tx.QueryRow(ctx, `
+			DECLARE $id AS Utf8;
+			SELECT product_id, installation_id, identity_namespace, age_category,
+			       guardian_relationship, link_across_products, blind_index_version,
+			       email_blind_index, expires_at, verified_at, processing_token, processing_at
+			FROM email_verifications WHERE id = $id;`,
+			query.WithParameters(ydb.ParamsBuilder().Param("$id").Text(verificationID).Build()))
+		if err != nil {
+			return noRows(err)
+		}
+		if err := row.Scan(&verification.ProductID, &verification.InstallationID, &verification.Namespace,
+			&verification.AgeCategory, &verification.GuardianRelationship, &verification.LinkAcrossProducts,
+			&indexVersion, &verification.BlindIndex, &verification.ExpiresAt, &verification.VerifiedAt,
+			&storedClaim, &processingAt); err != nil {
+			return err
+		}
+		verification.BlindIndexVersion = int(indexVersion)
+		if verification.ProductID != productID || storedClaim == nil || *storedClaim != claimToken || claimToken == "" ||
+			processingAt == nil || !processingAt.Add(EmailVerificationClaimLease).After(now) || !verification.ExpiresAt.After(now) ||
+			!verifiedEmailIdentityMatches(verification, identity, indexes) {
+			return domain.ErrNotFound
+		}
+		result, created, err = s.registerEmailIdentityTx(ctx, tx, identity, indexes)
+		if err != nil {
+			return err
+		}
+		return consumeEmailVerificationTx(ctx, tx, verificationID, claimToken, result.PersonID, now)
 	})
+	if err != nil {
+		return EmailIdentity{}, false, err
+	}
+	return result, created, nil
+}
+
+func verifiedEmailIdentityMatches(verification EmailVerification, identity NewEmailIdentity, indexes []cryptokit.BlindIndex) bool {
+	if verification.VerifiedAt == nil || !verification.VerifiedAt.Equal(identity.VerifiedAt) ||
+		verification.ProductID != identity.ProductID || verification.Namespace != identity.Namespace ||
+		verification.AgeCategory != identity.AgeCategory ||
+		!equalOptionalText(verification.InstallationID, identity.InstallationID) ||
+		!equalOptionalText(verification.GuardianRelationship, identity.GuardianRelationship) {
+		return false
+	}
+	scope, key := "product", verification.ProductID
+	if verification.Namespace != "donation" && verification.LinkAcrossProducts {
+		scope, key = "global", "global"
+	}
+	if identity.LinkageScope != scope || identity.ScopeKey != key {
+		return false
+	}
+	var verifiedIndex, currentIndex bool
+	for _, index := range indexes {
+		if index.Version == verification.BlindIndexVersion {
+			if !bytes.Equal(index.Value, verification.BlindIndex) {
+				return false
+			}
+			verifiedIndex = true
+		}
+		if index.Version == identity.BlindIndexVersion {
+			if !bytes.Equal(index.Value, identity.BlindIndex) {
+				return false
+			}
+			currentIndex = true
+		}
+	}
+	return verifiedIndex && currentIndex
+}
+
+func equalOptionalText(a, b *string) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }
 
 func (s *Store) ReleaseEmailVerification(ctx context.Context, id, claimToken string) error {
