@@ -27,7 +27,7 @@ type IdentityStore interface {
 	CreateEmailVerification(context.Context, store.EmailVerification) error
 	ClaimVerifiedEmail(context.Context, string, string, string, time.Time, time.Duration) (store.EmailVerification, error)
 	ReleaseEmailVerification(context.Context, string, string) error
-	ConsumeEmailVerification(context.Context, string, string, string, time.Time) error
+	RegisterVerifiedEmailIdentity(context.Context, string, string, string, store.NewEmailIdentity, []cryptokit.BlindIndex) (store.EmailIdentity, bool, error)
 	RegisterEmailIdentity(context.Context, store.NewEmailIdentity, []cryptokit.BlindIndex) (store.EmailIdentity, bool, error)
 }
 
@@ -120,7 +120,7 @@ func (s *IdentityService) CompleteEmailVerification(ctx context.Context, verific
 	if err != nil {
 		return RegisterEmailIdentityResult{}, err
 	}
-	verification, err := s.store.ClaimVerifiedEmail(ctx, verificationID, productID, claimToken, now, 5*time.Minute)
+	verification, err := s.store.ClaimVerifiedEmail(ctx, verificationID, productID, claimToken, now, store.EmailVerificationClaimLease)
 	if err != nil {
 		return RegisterEmailIdentityResult{}, err
 	}
@@ -138,7 +138,7 @@ func (s *IdentityService) CompleteEmailVerification(ctx context.Context, verific
 		return RegisterEmailIdentityResult{}, err
 	}
 	defer clear(plaintext)
-	result, err := s.RegisterEmailIdentity(ctx, RegisterEmailIdentityInput{
+	identity, indexes, err := s.prepareEmailIdentity(ctx, RegisterEmailIdentityInput{
 		ProductID: verification.ProductID, Email: string(plaintext), Namespace: verification.Namespace,
 		AgeCategory: verification.AgeCategory, GuardianRelationship: verification.GuardianRelationship,
 		LinkAcrossProducts: verification.LinkAcrossProducts, CreateAccount: createAccount,
@@ -147,26 +147,39 @@ func (s *IdentityService) CompleteEmailVerification(ctx context.Context, verific
 	if err != nil {
 		return RegisterEmailIdentityResult{}, err
 	}
-	if err := s.store.ConsumeEmailVerification(ctx, verificationID, claimToken, result.PersonID, now); err != nil {
-		return RegisterEmailIdentityResult{}, err
+	existing, created, err := s.store.RegisterVerifiedEmailIdentity(ctx, verificationID, productID, claimToken, identity, indexes)
+	if err != nil {
+		return RegisterEmailIdentityResult{}, fmt.Errorf("register verified identity transaction: %w", err)
 	}
 	claimed = false
-	return result, nil
+	return RegisterEmailIdentityResult{PersonID: existing.PersonID, AccountID: existing.AccountID, Created: created}, nil
 }
 
 func (s *IdentityService) RegisterEmailIdentity(ctx context.Context, input RegisterEmailIdentityInput) (RegisterEmailIdentityResult, error) {
+	identity, indexes, err := s.prepareEmailIdentity(ctx, input)
+	if err != nil {
+		return RegisterEmailIdentityResult{}, err
+	}
+	existing, created, err := s.store.RegisterEmailIdentity(ctx, identity, indexes)
+	if err != nil {
+		return RegisterEmailIdentityResult{}, fmt.Errorf("register identity transaction: %w", err)
+	}
+	return RegisterEmailIdentityResult{PersonID: existing.PersonID, AccountID: existing.AccountID, Created: created}, nil
+}
+
+func (s *IdentityService) prepareEmailIdentity(ctx context.Context, input RegisterEmailIdentityInput) (store.NewEmailIdentity, []cryptokit.BlindIndex, error) {
 	normalizedEmail, err := normalizeEmail(input.Email)
 	if err != nil {
-		return RegisterEmailIdentityResult{}, domain.ErrInvalid
+		return store.NewEmailIdentity{}, nil, domain.ErrInvalid
 	}
 	input.Email = normalizedEmail
 	if err := s.validateRegistration(input); err != nil {
-		return RegisterEmailIdentityResult{}, err
+		return store.NewEmailIdentity{}, nil, err
 	}
 
 	linkageScope, scopeKey, err := s.linkageScope(input)
 	if err != nil {
-		return RegisterEmailIdentityResult{}, err
+		return store.NewEmailIdentity{}, nil, err
 	}
 	indexMessage := []byte(strings.Join([]string{input.Namespace, linkageScope, scopeKey, normalizedEmail}, "\x00"))
 	currentIndex := s.indexer.Current(indexMessage)
@@ -174,38 +187,34 @@ func (s *IdentityService) RegisterEmailIdentity(ctx context.Context, input Regis
 
 	personID, err := ids.NewUUID()
 	if err != nil {
-		return RegisterEmailIdentityResult{}, err
+		return store.NewEmailIdentity{}, nil, err
 	}
 	identityID, err := ids.NewUUID()
 	if err != nil {
-		return RegisterEmailIdentityResult{}, err
+		return store.NewEmailIdentity{}, nil, err
 	}
 	aad := []byte(strings.Join([]string{"email-v1", identityID, input.Namespace, linkageScope, scopeKey}, "\x00"))
 	encrypted, err := s.envelope.Encrypt(ctx, []byte(normalizedEmail), aad)
 	if err != nil {
-		return RegisterEmailIdentityResult{}, err
+		return store.NewEmailIdentity{}, nil, err
 	}
 	accountID, err := ids.NewUUID()
 	if err != nil {
-		return RegisterEmailIdentityResult{}, err
+		return store.NewEmailIdentity{}, nil, err
 	}
 	if input.CreateAccount {
 		// Keep the generated ID; the store uses it only when an account must be created.
 	} else {
 		accountID = ""
 	}
-	existing, created, err := s.store.RegisterEmailIdentity(ctx, store.NewEmailIdentity{
+	return store.NewEmailIdentity{
 		ID: identityID, PersonID: personID, AccountID: accountID, ProductID: input.ProductID,
 		Namespace: input.Namespace, LinkageScope: linkageScope, ScopeKey: scopeKey,
 		BlindIndexVersion: currentIndex.Version, BlindIndex: currentIndex.Value,
 		EncryptedEmail: encrypted, AgeCategory: input.AgeCategory,
 		GuardianRelationship: input.GuardianRelationship, VerifiedAt: input.VerifiedAt,
 		CreateAccount: input.CreateAccount, InstallationID: input.InstallationID,
-	}, allIndexes)
-	if err != nil {
-		return RegisterEmailIdentityResult{}, fmt.Errorf("register identity transaction: %w", err)
-	}
-	return RegisterEmailIdentityResult{PersonID: existing.PersonID, AccountID: existing.AccountID, Created: created}, nil
+	}, allIndexes, nil
 }
 
 func (s *IdentityService) validateRegistration(input RegisterEmailIdentityInput) error {

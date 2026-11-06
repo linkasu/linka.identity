@@ -41,8 +41,20 @@ func (s *Store) RegisterEmailIdentity(ctx context.Context, identity NewEmailIden
 	var result EmailIdentity
 	var created bool
 	err := s.serializable(ctx, func(ctx context.Context, tx query.TxActor) error {
-		result = EmailIdentity{}
-		created = false
+		var err error
+		result, created, err = s.registerEmailIdentityTx(ctx, tx, identity, indexes)
+		return err
+	})
+	if err != nil {
+		return EmailIdentity{}, false, err
+	}
+	return result, created, nil
+}
+
+func (s *Store) registerEmailIdentityTx(ctx context.Context, tx query.TxActor, identity NewEmailIdentity, indexes []cryptokit.BlindIndex) (EmailIdentity, bool, error) {
+	var result EmailIdentity
+	var created bool
+	err := func() error {
 
 		for _, index := range indexes {
 			row, err := tx.QueryRow(ctx, `
@@ -184,7 +196,7 @@ func (s *Store) RegisterEmailIdentity(ctx context.Context, identity NewEmailIden
 		result.MatchedBlindIndexVersion = identity.BlindIndexVersion
 		created = true
 		return nil
-	})
+	}()
 	if err != nil {
 		return EmailIdentity{}, false, err
 	}
