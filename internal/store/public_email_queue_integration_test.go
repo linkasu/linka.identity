@@ -58,6 +58,10 @@ func TestYDBPublicEmailQueue(t *testing.T) {
 			}); err != nil {
 				t.Error(err)
 			}
+			if err := s.Client().Exec(cleanup, `DECLARE $id AS Utf8; DELETE FROM email_verifications WHERE id=$id;`,
+				query.WithParameters(ydb.ParamsBuilder().Param("$id").Text(id).Build()), query.WithTxControl(query.SerializableReadWriteTxControl(query.CommitTx()))); err != nil {
+				t.Error(err)
+			}
 		}
 		for _, id := range events {
 			if err := s.Client().Exec(cleanup, `DECLARE $id AS Utf8; DELETE FROM public_auth_events WHERE event_id=$id;`, query.WithParameters(ydb.ParamsBuilder().Param("$id").Text(id).Build()), query.WithTxControl(query.SerializableReadWriteTxControl(query.CommitTx()))); err != nil {
