@@ -30,17 +30,17 @@ Lockbox stores workload credentials, product registry, pairwise HMAC key, blind-
 
 ## Release ordering
 
-`.github/workflows/publish.yml` publishes `sha-<commit>` from the exact CI-tested commit. Deployment mirrors that image, resolves its `sha256:` registry digest, and uses the digest for both steps:
+`.github/workflows/publish.yml` publishes `sha-<commit>` from the exact CI-tested commit. Deployment is manual-only, requires successful CI for the exact SHA/tag, and mirrors the image to an immutable YC digest.
 
-1. Run `/usr/local/bin/schema` against Serverless YDB with the deploy service-account key.
-2. Snapshot the active revision and gateway specification, then apply the reviewed gateway `20 rps` limit while the old revision remains active.
-3. Verify gateway health and the public worker-path `404` before creating the new runtime revision.
-4. Create the runtime revision with metadata auth and Lockbox references, then verify workers, `/readyz`, JWKS, and the public broker route.
-5. On any failure after the snapshot, restore both the previous revision and gateway specification.
+1. For a schema change, use the reviewed [write-fenced cutover procedure](public-account-release.md), native backup/restore rehearsal and a separate exact-image migrator operation.
+2. `maintenance` deploys a closed static handler without DB/KMS/SMTP/workers. It does not prove old invocations have drained; fence the retired runtime principal as well.
+3. `normal` first runs `/usr/local/bin/schema -check` from the exact image: readiness only, no DDL. Schema 1 is rejected before runtime deploy.
+4. Deploy the normal revision with metadata auth and pinned Lockbox references, apply the reviewed gateway, and verify workers, readiness/JWKS and public worker-path `404`.
+5. On a post-promotion failure, keep/deploy the reviewed maintenance image. There is no automatic schema mutation or rollback to old code.
 
 No `DATABASE_URL`, PostgreSQL migration, mutable deployment tag, VPC connector, or service-account-key JSON exists in the runtime revision.
 
-The automated rollback restores only the previous container revision and gateway specification, not YDB DDL. Until a backward-compatible migration/rollback policy is implemented, the production workflow explicitly refuses any `schema.Version` other than `1`; schema bumps require a separately reviewed release procedure.
+Production uses schema **2** after the [2026-11-07 release](releases/2026-11-07-public-accounts.md). The workflow's source guard requires 2 and the read-only database check requires the same version. A future schema bump requires a new reviewed cutover; changing the source guard alone never authorizes a migration. The schema-1 runtime principal remains write-fenced.
 
 ## Serverless worker scheduling
 
