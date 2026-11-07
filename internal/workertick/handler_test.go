@@ -28,7 +28,7 @@ func TestHandlerProcessesWorkersInOrder(t *testing.T) {
 			return nil
 		})
 	}
-	handler := New(processor("outbox"), processor("privacy"), processor("verification"))
+	handler := New(processor("outbox"), processor("privacy"), processor("verification"), processor("registration"))
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, Path, nil)
 	request = request.WithContext(context.WithValue(request.Context(), contextKey{}, "request"))
@@ -41,7 +41,7 @@ func TestHandlerProcessesWorkersInOrder(t *testing.T) {
 	if got, want := response.Body.String(), "{\"status\":\"ok\"}\n"; got != want {
 		t.Fatalf("body: got %q, want %q", got, want)
 	}
-	if want := []string{"outbox", "privacy", "verification"}; !reflect.DeepEqual(calls, want) {
+	if want := []string{"outbox", "privacy", "verification", "registration"}; !reflect.DeepEqual(calls, want) {
 		t.Fatalf("call order: got %v, want %v", calls, want)
 	}
 }
@@ -61,6 +61,7 @@ func TestHandlerReturnsRetryWithoutErrorDetails(t *testing.T) {
 			calls = append(calls, "verification")
 			return nil
 		}),
+		nil,
 	)
 	response := httptest.NewRecorder()
 
@@ -88,7 +89,7 @@ func TestHandlerRejectsOtherMethodsWithoutProcessing(t *testing.T) {
 		called = true
 		return nil
 	})
-	handler := New(processor, processor, processor)
+	handler := New(processor, processor, processor, nil)
 
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		response := httptest.NewRecorder()

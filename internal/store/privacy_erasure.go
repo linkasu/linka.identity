@@ -311,7 +311,7 @@ func erasePerson(ctx context.Context, tx query.TxActor, personID string, now tim
 			return err
 		}
 	}
-	if err := erasePersonRecords(ctx, tx, personID, nil); err != nil {
+	if err := erasePersonRecords(ctx, tx, personID, nil, now); err != nil {
 		return err
 	}
 	return tx.Exec(ctx, `
@@ -343,7 +343,7 @@ func erasePersonProduct(ctx context.Context, tx query.TxActor, personID, product
 			return err
 		}
 	}
-	if err := erasePersonRecords(ctx, tx, personID, &productID); err != nil {
+	if err := erasePersonRecords(ctx, tx, personID, &productID, now); err != nil {
 		return err
 	}
 	return tx.Exec(ctx, `
@@ -405,7 +405,10 @@ func installationIDsForPerson(ctx context.Context, executor query.Executor, pers
 	return ids, nil
 }
 
-func erasePersonRecords(ctx context.Context, tx query.TxActor, personID string, productID *string) error {
+func erasePersonRecords(ctx context.Context, tx query.TxActor, personID string, productID *string, now time.Time) error {
+	if err := erasePublicPersonState(ctx, tx, personID, productID, now); err != nil {
+		return err
+	}
 	identities, err := identityIDsForPerson(ctx, tx, personID, productID)
 	if err != nil {
 		return err
@@ -452,7 +455,10 @@ func erasePersonRecords(ctx context.Context, tx query.TxActor, personID string, 
 			Build()))
 }
 
-func eraseInstallationRecords(ctx context.Context, tx query.TxActor, installationID string, productID *string, _ time.Time) error {
+func eraseInstallationRecords(ctx context.Context, tx query.TxActor, installationID string, productID *string, now time.Time) error {
+	if err := erasePublicInstallationState(ctx, tx, installationID, productID, now); err != nil {
+		return err
+	}
 	aliases, err := aliasKeysForSubject(ctx, tx, "installation", installationID, productID)
 	if err != nil {
 		return err

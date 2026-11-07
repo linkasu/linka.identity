@@ -3,10 +3,7 @@ package token
 import (
 	"crypto/ed25519"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"strings"
 	"time"
 
 	"github.com/linka-cloud/linka.identity/internal/ids"
@@ -129,7 +126,6 @@ func (s *Signer) signClaims(input SignInput) (string, time.Time, error) {
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	header := map[string]string{"alg": "EdDSA", "typ": "JWT", "kid": s.keyID}
 	claims := Claims{
 		Issuer:        s.issuer,
 		Subject:       input.Subject,
@@ -144,17 +140,8 @@ func (s *Signer) signClaims(input SignInput) (string, time.Time, error) {
 		ExpiresAt:     expiresAt.Unix(),
 		TokenID:       tokenID,
 	}
-	headerJSON, err := json.Marshal(header)
-	if err != nil {
-		return "", time.Time{}, fmt.Errorf("encode token header: %w", err)
-	}
-	claimsJSON, err := json.Marshal(claims)
-	if err != nil {
-		return "", time.Time{}, fmt.Errorf("encode token claims: %w", err)
-	}
-	unsigned := rawBase64(headerJSON) + "." + rawBase64(claimsJSON)
-	signature := ed25519.Sign(s.privateKey, []byte(unsigned))
-	return unsigned + "." + rawBase64(signature), expiresAt, nil
+	encoded, err := s.signPayload(claims)
+	return encoded, expiresAt, err
 }
 
 func (s *Signer) JWKS() map[string]any {
@@ -192,38 +179,9 @@ func (s *Signer) VerifyRefresh(encoded string) (Claims, error) {
 }
 
 func (s *Signer) verify(encoded string) (Claims, error) {
-	parts := strings.Split(encoded, ".")
-	if len(parts) != 3 {
-		return Claims{}, errors.New("invalid token structure")
-	}
-	headerPayload, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return Claims{}, errors.New("invalid token header")
-	}
-	var header struct {
-		Algorithm string `json:"alg"`
-		Type      string `json:"typ"`
-		KeyID     string `json:"kid"`
-	}
-	headerDecoder := json.NewDecoder(strings.NewReader(string(headerPayload)))
-	headerDecoder.DisallowUnknownFields()
-	if err := headerDecoder.Decode(&header); err != nil || header.Algorithm != "EdDSA" || header.Type != "JWT" {
-		return Claims{}, errors.New("invalid token header")
-	}
-	publicKey, ok := s.publicKeys[header.KeyID]
-	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil || !ok || !ed25519.Verify(publicKey, []byte(parts[0]+"."+parts[1]), signature) {
-		return Claims{}, errors.New("invalid token signature")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return Claims{}, errors.New("invalid token payload")
-	}
 	var claims Claims
-	claimsDecoder := json.NewDecoder(strings.NewReader(string(payload)))
-	claimsDecoder.DisallowUnknownFields()
-	if err := claimsDecoder.Decode(&claims); err != nil {
-		return Claims{}, errors.New("invalid token claims")
+	if err := s.verifyPayload(encoded, &claims); err != nil {
+		return Claims{}, err
 	}
 	return claims, nil
 }

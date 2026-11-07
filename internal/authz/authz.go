@@ -11,12 +11,13 @@ import (
 type Role string
 
 const (
-	RoleProduct       Role = "product"
-	RoleEmailVerifier Role = "email_verifier"
-	RoleIdentityAdmin Role = "identity_admin"
-	RolePrivacyAdmin  Role = "privacy_admin"
-	RolePrivacyGlobal Role = "privacy_global"
-	RoleOrgAdmin      Role = "organization_admin"
+	RoleProduct              Role = "product"
+	RoleEmailVerifier        Role = "email_verifier"
+	RoleIdentityAdmin        Role = "identity_admin"
+	RolePrivacyAdmin         Role = "privacy_admin"
+	RolePrivacyGlobal        Role = "privacy_global"
+	RoleOrgAdmin             Role = "organization_admin"
+	RoleProductDirectoryRead Role = "crm:product-directory:read"
 )
 
 type Workload struct {
@@ -58,7 +59,7 @@ func New(workloads []Workload) (*Authenticator, error) {
 		principal := Principal{ID: workload.ID, roles: make(map[Role]struct{}), products: make(map[string]struct{})}
 		for _, role := range workload.Roles {
 			switch role {
-			case RoleProduct, RoleEmailVerifier, RoleIdentityAdmin, RolePrivacyAdmin, RolePrivacyGlobal, RoleOrgAdmin:
+			case RoleProduct, RoleEmailVerifier, RoleIdentityAdmin, RolePrivacyAdmin, RolePrivacyGlobal, RoleOrgAdmin, RoleProductDirectoryRead:
 				principal.roles[role] = struct{}{}
 			default:
 				return nil, errors.New("unknown workload role")
@@ -70,7 +71,7 @@ func New(workloads []Workload) (*Authenticator, error) {
 			}
 			principal.products[product] = struct{}{}
 		}
-		if principal.Has(RoleProduct) && len(principal.products) == 0 {
+		if (principal.Has(RoleProduct) || principal.Has(RoleProductDirectoryRead)) && len(principal.products) == 0 {
 			return nil, errors.New("product workload must have at least one product scope")
 		}
 		credentials = append(credentials, credential{principal: principal, digest: sha256.Sum256([]byte(workload.Token))})

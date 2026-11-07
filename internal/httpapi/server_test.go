@@ -31,7 +31,7 @@ func TestUnauthorizedEmailRequestDoesNotLogBodyOrAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := New(nil, nil, signer, authenticator, pairwiseIDs, map[string]string{"plays": "metric"}, nil, nil, false, time.Minute, logger)
+	handler := New(nil, nil, signer, authenticator, pairwiseIDs, map[string]string{"plays": "metric"}, nil, nil, nil, nil, false, time.Minute, logger)
 	body := `{"product_id":"plays","email":"secret@example.test"}`
 	request := httptest.NewRequest(http.MethodPost, "/v1/email-identities?email=also-secret", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")

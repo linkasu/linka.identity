@@ -319,6 +319,7 @@ func (s *Store) ValidateBlindIndexVersions(ctx context.Context, configured map[i
 	for _, statement := range []string{
 		`SELECT blind_index_version FROM email_blind_indexes;`,
 		`SELECT blind_index_version FROM email_verifications;`,
+		`SELECT email_blind_index_version FROM public_email_challenges;`,
 	} {
 		rows, err := s.client.QueryResultSet(ctx, statement, query.WithTxControl(query.SnapshotReadOnlyTxControl()))
 		if err != nil {
@@ -348,6 +349,7 @@ func (s *Store) ValidateEnvelopeKeyIDs(ctx context.Context, configured map[strin
 	for _, statement := range []string{
 		`SELECT key_id FROM email_identities;`,
 		`SELECT key_id FROM email_verifications;`,
+		`SELECT code_kms_key_id FROM public_email_challenges WHERE code_kms_key_id <> '';`,
 	} {
 		rows, err := s.client.QueryResultSet(ctx, statement, query.WithTxControl(query.SnapshotReadOnlyTxControl()))
 		if err != nil {

@@ -17,8 +17,12 @@ type handler struct {
 	processors []Processor
 }
 
-func New(outbox, privacyErasure, verificationCleanup Processor) http.Handler {
-	return &handler{processors: []Processor{outbox, privacyErasure, verificationCleanup}}
+func New(outbox, privacyErasure, verificationCleanup Processor, registration Processor) http.Handler {
+	processors := []Processor{outbox, privacyErasure, verificationCleanup}
+	if registration != nil {
+		processors = append(processors, registration)
+	}
+	return &handler{processors: processors}
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

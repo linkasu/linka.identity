@@ -156,10 +156,10 @@ func TestMinorGlobalLinkingRequiresFeatureFlag(t *testing.T) {
 }
 
 func TestNormalizeEmailRejectsDisplayName(t *testing.T) {
-	if _, err := normalizeEmail("User <user@example.test>"); err == nil {
+	if _, err := domain.NormalizeEmail("User <user@example.test>"); err == nil {
 		t.Fatal("expected display-name email to be rejected")
 	}
-	value, err := normalizeEmail(" User@Example.Test ")
+	value, err := domain.NormalizeEmail(" User@Example.Test ")
 	if err != nil || value != "user@example.test" {
 		t.Fatalf("unexpected normalization: %q %v", value, err)
 	}

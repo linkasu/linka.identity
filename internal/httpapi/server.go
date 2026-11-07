@@ -33,6 +33,8 @@ type Server struct {
 	pairwise            *pairwise.Generator
 	products            map[string]string
 	publicBroker        *installationbroker.Broker
+	publicAccounts      PublicAccountBroker
+	directory           ProductDirectory
 	publicOrigins       map[string]struct{}
 	publicRequestLimit  *tokenBucket
 	publicRegisterLimit *tokenBucket
@@ -48,15 +50,16 @@ const requestIDKey contextKey = "request-id"
 const principalKey contextKey = "principal"
 
 func New(database *store.Store, identities *service.IdentityService, tokens *token.Signer, authenticator *authz.Authenticator,
-	pairwiseIDs *pairwise.Generator, products map[string]string, publicBroker *installationbroker.Broker, publicOrigins map[string]struct{},
+	pairwiseIDs *pairwise.Generator, products map[string]string, publicBroker *installationbroker.Broker, publicAccounts PublicAccountBroker, directory ProductDirectory, publicOrigins map[string]struct{},
 	requireOutbox bool, outboxMaxAge time.Duration, logger *slog.Logger) http.Handler {
 	server := &Server{
 		store: database, identities: identities, tokens: tokens,
 		authenticator: authenticator, pairwise: pairwiseIDs, products: products,
-		publicBroker: publicBroker, publicOrigins: publicOrigins,
+		publicBroker: publicBroker, publicAccounts: publicAccounts, publicOrigins: publicOrigins,
+		directory:     directory,
 		requireOutbox: requireOutbox, outboxMaxAge: outboxMaxAge, logger: logger, now: time.Now,
 	}
-	if publicBroker != nil {
+	if publicBroker != nil || publicAccounts != nil {
 		server.publicRequestLimit = newTokenBucket(60, time.Second)
 		server.publicRegisterLimit = newTokenBucket(6, 10*time.Second)
 	}
@@ -71,6 +74,22 @@ func New(database *store.Store, identities *service.IdentityService, tokens *tok
 		mux.Handle("OPTIONS /v1/public/installations/token", server.public(http.HandlerFunc(server.publicPreflight)))
 		mux.Handle("PUT /v1/public/installations/telemetry-preference", server.public(http.HandlerFunc(server.setPublicTelemetryPreference)))
 		mux.Handle("OPTIONS /v1/public/installations/telemetry-preference", server.public(http.HandlerFunc(server.publicPreflight)))
+	}
+	if publicAccounts != nil {
+		mux.Handle("POST /v1/public/email/challenges", server.public(http.HandlerFunc(server.beginPublicAccountChallenge)))
+		mux.Handle("OPTIONS /v1/public/email/challenges", server.public(http.HandlerFunc(server.publicAccountPreflight)))
+		mux.Handle("POST /v1/public/email/challenges/{id}/verify", server.public(http.HandlerFunc(server.verifyPublicAccountChallenge)))
+		mux.Handle("OPTIONS /v1/public/email/challenges/{id}/verify", server.public(http.HandlerFunc(server.publicAccountPreflight)))
+		mux.Handle("POST /v1/public/account-sessions/refresh", server.public(http.HandlerFunc(server.refreshPublicAccountSession)))
+		mux.Handle("OPTIONS /v1/public/account-sessions/refresh", server.public(http.HandlerFunc(server.publicAccountPreflight)))
+		mux.Handle("POST /v1/public/account-sessions/revoke", server.public(http.HandlerFunc(server.revokePublicAccountSession)))
+		mux.Handle("OPTIONS /v1/public/account-sessions/revoke", server.public(http.HandlerFunc(server.publicAccountPreflight)))
+		mux.Handle("PUT /v1/public/account-profile", server.public(http.HandlerFunc(server.updatePublicAccountProfile)))
+		mux.Handle("OPTIONS /v1/public/account-profile", server.public(http.HandlerFunc(server.publicAccountPreflight)))
+	}
+	if directory != nil {
+		mux.Handle("POST /v1/internal/product-directory/query", server.require(authz.RoleProductDirectoryRead, http.HandlerFunc(server.queryProductDirectory)))
+		mux.Handle("POST /v1/internal/product-directory/check", server.require(authz.RoleProductDirectoryRead, http.HandlerFunc(server.checkProductDirectory)))
 	}
 	mux.Handle("POST /v1/installations", server.require(authz.RoleProduct, http.HandlerFunc(server.createInstallation)))
 	mux.Handle("POST /v1/email-verifications", server.require(authz.RoleProduct, http.HandlerFunc(server.beginEmailVerification)))

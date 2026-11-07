@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -362,6 +363,10 @@ func openIntegrationStore(t *testing.T, ctx context.Context) *store.Store {
 	databasePath := os.Getenv("TEST_YDB_DATABASE")
 	if endpoint == "" || databasePath == "" {
 		t.Skip("TEST_YDB_ENDPOINT and TEST_YDB_DATABASE are not set")
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme != "grpc" || (u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost" && u.Hostname() != "::1") || databasePath != "/local" {
+		t.Fatal("integration tests require an explicitly configured loopback /local emulator")
 	}
 	database, err := store.Open(ctx, endpoint, databasePath)
 	if err != nil {

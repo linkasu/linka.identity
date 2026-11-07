@@ -117,28 +117,32 @@ func (b *Broker) Register(ctx context.Context, input RegisterInput) (Registratio
 	}
 	input.RecordedAt = input.RecordedAt.UTC().Truncate(time.Microsecond)
 	rootID := b.registrationID(input, product.Audience)
-	consentID, err := ids.NewUUID()
-	if err != nil {
-		return Registration{}, err
-	}
-	suppressionID, err := ids.NewUUID()
-	if err != nil {
-		return Registration{}, err
-	}
 	installationKey := b.pairwise.Subject(input.ProductID, product.Audience, "installation", rootID)
-	consentStatus := "granted"
-	if input.Preference == "denied" {
-		consentStatus = "withdrawn"
-	}
-	installation, err := b.repository.RegisterPublicInstallation(ctx, store.PublicInstallationRegistration{
+	registration := store.PublicInstallationRegistration{
 		Installation: store.Installation{ID: rootID, ProductID: input.ProductID, Platform: input.Platform},
 		OpaqueKey:    installationKey, Audience: product.Audience, Preference: input.Preference,
-		PreferenceAt: input.RecordedAt.UTC(), SuppressionID: suppressionID,
-		Consent: store.Consent{
+		PreferenceAt: input.RecordedAt.UTC(),
+	}
+	if input.Preference != "unknown" {
+		consentID, err := ids.NewUUID()
+		if err != nil {
+			return Registration{}, err
+		}
+		suppressionID, err := ids.NewUUID()
+		if err != nil {
+			return Registration{}, err
+		}
+		consentStatus := "granted"
+		if input.Preference == "denied" {
+			consentStatus = "withdrawn"
+		}
+		registration.SuppressionID = suppressionID
+		registration.Consent = store.Consent{
 			ID: consentID, Subject: store.Subject{Kind: "installation", ID: rootID}, ProductID: input.ProductID,
 			ConsentType: "telemetry", PolicyVersion: input.PolicyVersion, Status: consentStatus, RecordedAt: input.RecordedAt.UTC(),
-		},
-	})
+		}
+	}
+	installation, err := b.repository.RegisterPublicInstallation(ctx, registration)
 	if err != nil {
 		return Registration{}, err
 	}
@@ -263,7 +267,7 @@ func (b *Broker) issueAccess(productID, audience, installationKey string) (Acces
 func (b *Broker) validRegistration(product Product, preference, policyVersion string, recordedAt time.Time) bool {
 	now := b.now().UTC()
 	_, additional := product.AdditionalPolicies[policyVersion]
-	return (preference == "allowed" || preference == "denied") && (policyVersion == b.config.PolicyVersion || additional) &&
+	return (preference == "allowed" || preference == "denied" || preference == "unknown") && (policyVersion == b.config.PolicyVersion || additional) &&
 		!recordedAt.IsZero() && !recordedAt.Before(now.Add(-24*time.Hour)) && !recordedAt.After(now.Add(5*time.Minute))
 }
 

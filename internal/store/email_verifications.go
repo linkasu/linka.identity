@@ -28,17 +28,26 @@ type EmailVerification struct {
 	ExpiresAt            time.Time
 	VerifiedAt           *time.Time
 	ConsumedAt           *time.Time
+	VerifiedBy           *string
+	EvidenceID           *string
+	ProcessingToken      *string
+	ProcessingAt         *time.Time
 	Version              uint64
 }
 
 func (s *Store) CreateEmailVerification(ctx context.Context, verification EmailVerification) error {
 	return s.serializable(ctx, func(ctx context.Context, tx query.TxActor) error {
-		if verification.InstallationID != nil {
-			if err := validateSubjectWith(ctx, tx, Subject{Kind: "installation", ID: *verification.InstallationID}, verification.ProductID); err != nil {
-				return err
-			}
+		return s.createEmailVerificationTx(ctx, tx, verification)
+	})
+}
+
+func (s *Store) createEmailVerificationTx(ctx context.Context, tx query.TxActor, verification EmailVerification) error {
+	if verification.InstallationID != nil {
+		if err := validateSubjectWith(ctx, tx, Subject{Kind: "installation", ID: *verification.InstallationID}, verification.ProductID); err != nil {
+			return err
 		}
-		return tx.Exec(ctx, `
+	}
+	return tx.Exec(ctx, `
 			DECLARE $id AS Utf8;
 			DECLARE $product_id AS Utf8;
 			DECLARE $installation_id AS Utf8?;
@@ -66,24 +75,23 @@ func (s *Store) CreateEmailVerification(ctx context.Context, verification EmailV
 				$blind_index, $encrypted_email, $email_nonce, $wrapped_data_key,
 				$key_id, $algorithm, $expires_at, $created_at, 1u
 			);`, query.WithParameters(ydb.ParamsBuilder().
-			Param("$id").Text(verification.ID).
-			Param("$product_id").Text(verification.ProductID).
-			Param("$installation_id").Any(nullableText(verification.InstallationID)).
-			Param("$namespace").Text(verification.Namespace).
-			Param("$age_category").Text(verification.AgeCategory).
-			Param("$guardian_relationship").Any(nullableText(verification.GuardianRelationship)).
-			Param("$link_across_products").Bool(verification.LinkAcrossProducts).
-			Param("$blind_index_version").Uint64(uint64(verification.BlindIndexVersion)).
-			Param("$blind_index").Bytes(verification.BlindIndex).
-			Param("$encrypted_email").Bytes(verification.EncryptedEmail.Data).
-			Param("$email_nonce").Bytes(verification.EncryptedEmail.Nonce).
-			Param("$wrapped_data_key").Bytes(verification.EncryptedEmail.WrappedDataKey).
-			Param("$key_id").Text(verification.EncryptedEmail.KeyID).
-			Param("$algorithm").Text(verification.EncryptedEmail.Algorithm).
-			Param("$expires_at").Timestamp(verification.ExpiresAt.UTC()).
-			Param("$created_at").Timestamp(s.now().UTC()).
-			Build()))
-	})
+		Param("$id").Text(verification.ID).
+		Param("$product_id").Text(verification.ProductID).
+		Param("$installation_id").Any(nullableText(verification.InstallationID)).
+		Param("$namespace").Text(verification.Namespace).
+		Param("$age_category").Text(verification.AgeCategory).
+		Param("$guardian_relationship").Any(nullableText(verification.GuardianRelationship)).
+		Param("$link_across_products").Bool(verification.LinkAcrossProducts).
+		Param("$blind_index_version").Uint64(uint64(verification.BlindIndexVersion)).
+		Param("$blind_index").Bytes(verification.BlindIndex).
+		Param("$encrypted_email").Bytes(verification.EncryptedEmail.Data).
+		Param("$email_nonce").Bytes(verification.EncryptedEmail.Nonce).
+		Param("$wrapped_data_key").Bytes(verification.EncryptedEmail.WrappedDataKey).
+		Param("$key_id").Text(verification.EncryptedEmail.KeyID).
+		Param("$algorithm").Text(verification.EncryptedEmail.Algorithm).
+		Param("$expires_at").Timestamp(verification.ExpiresAt.UTC()).
+		Param("$created_at").Timestamp(s.now().UTC()).
+		Build()))
 }
 
 func (s *Store) VerifyEmailOwnership(ctx context.Context, id, productID, verifier, evidenceID string, now time.Time) error {
