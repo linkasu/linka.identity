@@ -1,6 +1,6 @@
 # Public product accounts: контракт I1 и допуск
 
-Статус: локальная, невыпущенная реализация в работе. Наличие этого документа или gateway template не означает deployment и допуск клиентов. Принятый общий scope — tracking `linkasu/crm#1`, Identity `linkasu/linka.identity#5`. Совместимость, ограждение, очистка и оставшиеся gates описаны в [runbook schema 1→2](public-account-release.md).
+Статус: I1 backend [выпущен 2026-11-07](releases/2026-11-07-public-accounts.md) на schema 2. Реальная доставка OTP отложена пользователем; клиентские blocking updates этим не разрешаются. Общий scope — tracking `linkasu/crm#1`, Identity `linkasu/linka.identity#5`. Совместимость, ограждение и оставшиеся gates описаны в [runbook](public-account-release.md).
 
 ## Interface модуля
 
