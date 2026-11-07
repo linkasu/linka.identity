@@ -1,6 +1,6 @@
 # Выпуск I1: schema 1 → 2
 
-Статус: **локальная реализация, не разрешение применять миграцию**. Production Identity остаётся на schema 1; CRM schema 29 и выпуск Metrics не заменяют этот допуск.
+Статус: **подготовка подтверждённого пользователем cutover**, не подтверждение завершённой миграции. CRM schema 29 и выпуск Metrics не заменяют отдельные проверки Identity.
 
 ## Совместимость и ограждение
 
@@ -29,7 +29,9 @@
 7. Снять maintenance на том же digest с public accounts сначала выключенными; проверить private/V2 compatibility, readiness, JWKS и worker shield. Затем включить I1 только для разрешённого пилота после проверки SMTP/capacity. При ошибке после promotion возвращаться **в maintenance нового digest**, а не на schema-1 binary.
 8. Реальную доставку и OTP проверить только по пользовательскому запросу на согласованный адрес: пользователь отложил этот smoke, он остаётся обязательным непройденным gate. Проверить unknown bootstrap, очередь/claim-time expiry, purpose separation, profile CAS, refresh replay, private directory/current permissions и privacy erasure. Вернуть timer и invokers только после проверки нового runtime; отложенный smoke не разрешает массовое включение или app-blocking updates.
 
-Нативные backup/restore/rehearsal, прекращение production writers и новая runtime SMTP-конфигурация ещё **не выполнены**. Встроенный 7-дневный SYSTEM backup не является PITR или подтверждением rehearsal. Текущий `deploy-yc.yml` по-прежнему намеренно отказывается от `schema.Version != 1`; не заменять guard на `2` и не использовать старый automatic rollback. Для исполнения cutover нужен отдельно проверенный ручной workflow с явными maintenance/migrate/resume шагами и сохранением receipts.
+До подтверждения receipts native backup/restore/rehearsal, writer fence и новой runtime конфигурации normal rollout запрещён. Встроенный 7-дневный SYSTEM backup не является PITR или подтверждением rehearsal. `deploy-yc.yml` теперь запускается только вручную с точным SHA/tag и успешным CI: maintenance не подключается к БД, normal проверяет schema 2 через read-only `schema -check`. Миграция — отдельная операторская операция из того же digest. Автомиграции и automatic rollback удалены; прежний schema-1 образ после promotion не возвращать.
+
+При обнаружении повторного deploy прежнего main после успешного CI feature-ветки остановить legacy workflow. `workflow_run` downstream-публикации не является доказательством, что publish job действительно выполнился: успешный guard при skipped publish иначе повторно выкатывает старый main. Ручной режим не интерпретирует такой event как разрешение rollout.
 
 ## Временные данные и ключи
 
