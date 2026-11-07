@@ -64,7 +64,7 @@ func (r *beginRepository) PublicEmailChallenge(_ context.Context, id string) (st
 	return row, nil
 }
 
-func (r *beginRepository) ClaimPublicEmailDelivery(_ context.Context, owner string, products []string) (store.PublicEmailChallenge, store.EmailVerification, error) {
+func (r *beginRepository) ClaimPublicEmailDelivery(_ context.Context, owner string, products []string, _ uint64) (store.PublicEmailChallenge, store.EmailVerification, error) {
 	r.claimCalls++
 	if len(r.claimErrors) != 0 {
 		err := r.claimErrors[0]
@@ -72,7 +72,7 @@ func (r *beginRepository) ClaimPublicEmailDelivery(_ context.Context, owner stri
 		return store.PublicEmailChallenge{}, store.EmailVerification{}, err
 	}
 	for _, row := range r.rows {
-		if row.State != domain.PublicChallengeRequested {
+		if row.State != domain.PublicChallengeRequested || row.MailAvailableAt.After(time.Now().UTC()) {
 			continue
 		}
 		allowed := false
@@ -84,11 +84,30 @@ func (r *beginRepository) ClaimPublicEmailDelivery(_ context.Context, owner stri
 		}
 		until := time.Now().UTC().Add(90 * time.Second)
 		row.State, row.MailClaimToken, row.MailClaimUntil = domain.PublicChallengeDelivering, &owner, &until
+		row.ExpiresAt = time.Now().UTC().Add(domain.PublicEmailCodeTTL)
 		r.rows[row.ID] = row
 		verification, err := r.EmailVerification(context.Background(), row.ID)
+		verification.ExpiresAt = row.ExpiresAt
+		for i := range r.verifications {
+			if r.verifications[i].ID == row.ID {
+				r.verifications[i] = verification
+			}
+		}
 		return row, verification, err
 	}
 	return store.PublicEmailChallenge{}, store.EmailVerification{}, domain.ErrNotFound
+}
+
+func (r *beginRepository) DeferPublicEmailDelivery(_ context.Context, id, owner string, retryAt time.Time) error {
+	row := r.rows[id]
+	if row.MailClaimToken == nil || *row.MailClaimToken != owner {
+		return domain.ErrConflict
+	}
+	row.State, row.MailAvailableAt = domain.PublicChallengeRequested, retryAt
+	row.MailClaimToken, row.MailClaimUntil = nil, nil
+	row.ExpiresAt = row.CreatedAt.Add(domain.PublicEmailQueueTTL)
+	r.rows[id] = row
+	return nil
 }
 
 func (r *beginRepository) FinishPublicEmailDelivery(_ context.Context, id, owner string, state domain.PublicChallengeState) error {
@@ -141,8 +160,11 @@ func newBeginBroker(t *testing.T) (*Broker, *beginRepository, *cryptokit.Envelop
 func TestBeginPublicEmailChallengeProtectsPurposeContextAndAddress(t *testing.T) {
 	b, repository, envelope, input := newBeginBroker(t)
 	result, err := b.Begin(context.Background(), "fixture-installation-refresh", input)
-	if err != nil || result.Status != "pending" || result.ContractVersion != 1 || result.ChallengeID != input.RequestID || repository.creates != 1 {
+	if err != nil || result.Status != "queued" || result.ContractVersion != 1 || result.ChallengeID != input.RequestID || repository.creates != 1 {
 		t.Fatalf("begin: %+v error=%v", result, err)
+	}
+	if !result.ExpiresAt.After(time.Now().UTC().Add(47 * time.Hour)) {
+		t.Fatal("queue wait consumed the OTP delivery window")
 	}
 	encoded, _ := json.Marshal(result)
 	if bytes.Contains(bytes.ToLower(encoded), []byte("owner@example.test")) {

@@ -20,7 +20,7 @@ type PublicVerificationInput struct {
 // It neither verifies ownership nor persists a challenge; Broker owns those steps.
 func (s *IdentityService) PreparePublicVerification(ctx context.Context, input PublicVerificationInput) (store.EmailVerification, error) {
 	now := s.now().UTC()
-	if !domain.ValidUUID(input.ID) || !domain.ValidUUID(input.InstallationID) || !input.ExpiresAt.After(now) || input.ExpiresAt.After(now.Add(10*time.Minute)) {
+	if !domain.ValidUUID(input.ID) || !domain.ValidUUID(input.InstallationID) || !input.ExpiresAt.After(now) || input.ExpiresAt.After(now.Add(domain.PublicEmailQueueTTL)) {
 		return store.EmailVerification{}, domain.ErrInvalid
 	}
 	return s.prepareEmailVerification(ctx, BeginEmailVerificationInput{

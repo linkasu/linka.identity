@@ -25,8 +25,6 @@ import (
 	"github.com/linka-cloud/linka.identity/internal/token"
 )
 
-const challengeTTL = 10 * time.Minute
-
 type Repository interface {
 	PublicEmailChallenge(context.Context, string) (store.PublicEmailChallenge, error)
 	CreatePublicEmailChallenge(context.Context, store.PublicEmailChallenge, store.EmailVerification, uint64) (store.PublicEmailChallenge, bool, error)
@@ -36,8 +34,9 @@ type Repository interface {
 	RotatePublicAccountRefresh(context.Context, []byte, []byte) (store.AccountSession, store.ProductAccount, error)
 	RevokePublicAccountSession(context.Context, string, string) error
 	UpdatePublicAccountProfile(context.Context, string, string, uint64, string, string, string) (store.ProductAccount, error)
-	ClaimPublicEmailDelivery(context.Context, string, []string) (store.PublicEmailChallenge, store.EmailVerification, error)
+	ClaimPublicEmailDelivery(context.Context, string, []string, uint64) (store.PublicEmailChallenge, store.EmailVerification, error)
 	FinishPublicEmailDelivery(context.Context, string, string, domain.PublicChallengeState) error
+	DeferPublicEmailDelivery(context.Context, string, string, time.Time) error
 }
 
 type InstallationAuthenticator interface {
@@ -132,7 +131,7 @@ func (b *Broker) Begin(ctx context.Context, credential string, input ChallengeIn
 	}
 	now := b.now().UTC().Truncate(time.Microsecond)
 	verification, err := b.identity.PreparePublicVerification(ctx, service.PublicVerificationInput{ID: input.RequestID,
-		ProductID: input.ProductID, Email: input.Email, InstallationID: installation.InstallationID, ExpiresAt: now.Add(challengeTTL)})
+		ProductID: input.ProductID, Email: input.Email, InstallationID: installation.InstallationID, ExpiresAt: now.Add(domain.PublicEmailQueueTTL)})
 	if err != nil {
 		return ChallengeResponse{}, err
 	}
@@ -183,5 +182,14 @@ func otpAAD(id, product string) []byte {
 }
 
 func challengeResponse(c store.PublicEmailChallenge) ChallengeResponse {
-	return ChallengeResponse{ContractVersion: ContractVersion, ChallengeID: c.ID, Status: "pending", ExpiresAt: c.ExpiresAt, ResendAfter: c.CreatedAt.Add(time.Minute)}
+	status := string(c.State)
+	switch c.State {
+	case domain.PublicChallengeRequested:
+		status = "queued"
+	case domain.PublicChallengeDelivering, domain.PublicChallengeDelivered, domain.PublicChallengeDeliveryUncertain:
+		status = "pending"
+	case domain.PublicChallengeConsumed:
+		status = "verified"
+	}
+	return ChallengeResponse{ContractVersion: ContractVersion, ChallengeID: c.ID, Status: status, ExpiresAt: c.ExpiresAt, ResendAfter: c.CreatedAt.Add(time.Minute)}
 }

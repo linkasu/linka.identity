@@ -11,7 +11,7 @@ import (
 )
 
 // The single active OTP key cannot be replaced while a live proof references it.
-// Rotation waits at most the OTP lifetime; it never silently invalidates a code.
+// Rotation waits for queued and active proofs; it never silently invalidates a code.
 func (s *Store) ValidatePublicOTPKeyID(ctx context.Context, key string, now time.Time) error {
 	if key == "" || now.IsZero() {
 		return domain.ErrInvalid

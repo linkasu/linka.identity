@@ -45,10 +45,28 @@ func TestPublicEmailDeliveryGuards(t *testing.T) {
 		{owner, []string{"test", "test"}, domain.ErrInvalid}, {owner, []string{"bad product"}, domain.ErrInvalid},
 		{owner, make([]string, 101), domain.ErrInvalid},
 	} {
-		c, v, err := s.ClaimPublicEmailDelivery(context.Background(), tc.owner, tc.products)
+		c, v, err := s.ClaimPublicEmailDelivery(context.Background(), tc.owner, tc.products, 200)
 		if !errors.Is(err, tc.want) || c.ID != "" || v.ID != "" {
 			t.Fatalf("claim guard: %v", err)
 		}
+	}
+	for _, limit := range []uint64{0, 10001} {
+		if _, _, err := s.ClaimPublicEmailDelivery(context.Background(), owner, []string{"test"}, limit); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("daily limit %d accepted: %v", limit, err)
+		}
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	s.now = func() time.Time { return now }
+	for _, retry := range []time.Time{now, now.Add(-time.Second), now.Add(24*time.Hour + time.Microsecond)} {
+		if err := s.DeferPublicEmailDelivery(context.Background(), publicDeliveryID(t), owner, retry); !errors.Is(err, domain.ErrInvalid) {
+			t.Fatalf("invalid defer retry accepted: %v", err)
+		}
+	}
+	if err := s.DeferPublicEmailDelivery(context.Background(), "bad", owner, now.Add(time.Minute)); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatal(err)
+	}
+	if err := s.DeferPublicEmailDelivery(context.Background(), publicDeliveryID(t), "bad", now.Add(time.Minute)); !errors.Is(err, domain.ErrInvalid) {
+		t.Fatal(err)
 	}
 	for _, state := range []domain.PublicChallengeState{domain.PublicChallengeRequested, domain.PublicChallengeDelivering, domain.PublicChallengeVerified, domain.PublicChallengeConsumed, domain.PublicChallengeCancelled, domain.PublicChallengeExpired, domain.PublicChallengeLocked, "invalid"} {
 		if err := s.FinishPublicEmailDelivery(context.Background(), publicDeliveryID(t), owner, state); !errors.Is(err, domain.ErrInvalid) {
@@ -79,6 +97,7 @@ func TestPublicEmailDeliveryBinding(t *testing.T) {
 		"code":                 func(c *PublicEmailChallenge, _ *EmailVerification) { c.Code.Data = nil },
 		"address":              func(_ *PublicEmailChallenge, v *EmailVerification) { v.EncryptedEmail.Data = nil },
 		"verified":             func(_ *PublicEmailChallenge, v *EmailVerification) { now := time.Now(); v.VerifiedAt = &now },
+		"verified by":          func(_ *PublicEmailChallenge, v *EmailVerification) { value := "verifier"; v.VerifiedBy = &value },
 		"claimed":              func(_ *PublicEmailChallenge, v *EmailVerification) { s := "worker"; v.ProcessingToken = &s },
 	}
 	for name, mutate := range mutations {

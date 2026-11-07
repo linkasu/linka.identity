@@ -30,7 +30,7 @@ func (b *Broker) ProcessEmail(ctx context.Context, sender MailSender, owner stri
 	if len(products) == 0 {
 		return false, nil
 	}
-	c, v, err := b.repository.ClaimPublicEmailDelivery(ctx, owner, products)
+	c, v, err := b.repository.ClaimPublicEmailDelivery(ctx, owner, products, b.dailyLimit)
 	if errors.Is(err, domain.ErrNotFound) {
 		return false, nil
 	}
@@ -79,6 +79,11 @@ func (b *Broker) ProcessEmail(ctx context.Context, sender MailSender, owner stri
 	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	err = sender.Send(sendCtx, email, "Код подтверждения Линки", "Код для регистрации в приложении Линки: "+string(code)+"\n\nКод действует 10 минут. Никому его не сообщайте. Если вы не запрашивали код, проигнорируйте это письмо.")
 	cancel()
+	if accountmail.Temporary(err) {
+		writeCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		defer stop()
+		return true, b.repository.DeferPublicEmailDelivery(writeCtx, c.ID, owner, b.now().UTC().Add(5*time.Minute))
+	}
 	state := domain.PublicChallengeDelivered
 	if err != nil {
 		state = domain.PublicChallengeDeliveryFailed

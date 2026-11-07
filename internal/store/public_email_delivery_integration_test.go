@@ -80,7 +80,7 @@ func TestYDBPublicEmailDelivery(t *testing.T) {
 	claim := func(c PublicEmailChallenge) PublicEmailChallenge {
 		t.Helper()
 		now = now.Add(2 * time.Second)
-		got, v, err := s.ClaimPublicEmailDelivery(ctx, owner, []string{c.ProductID})
+		got, v, err := s.ClaimPublicEmailDelivery(ctx, owner, []string{c.ProductID}, 10000)
 		if err != nil || got.ID != c.ID || got.State != domain.PublicChallengeDelivering || got.MailAttempts != 1 || got.MailClaimToken == nil || *got.MailClaimToken != owner || v.ID != c.ID || !got.MailClaimUntil.Equal(now.Add(90*time.Second)) {
 			t.Fatalf("claim: state=%s error=%v", got.State, err)
 		}
@@ -107,14 +107,14 @@ func TestYDBPublicEmailDelivery(t *testing.T) {
 	t.Run("claim once and global rate boundary", func(t *testing.T) {
 		first, _ := seed()
 		second, _ := seed()
-		if _, _, err := s.ClaimPublicEmailDelivery(ctx, owner, []string{"not-registered"}); !errors.Is(err, domain.ErrNotFound) {
+		if _, _, err := s.ClaimPublicEmailDelivery(ctx, owner, []string{"not-registered"}, 10000); !errors.Is(err, domain.ErrNotFound) {
 			t.Fatalf("allowlist escaped: %v", err)
 		}
 		claim(first)
-		if _, _, err := s.ClaimPublicEmailDelivery(ctx, owner, []string{first.ProductID}); !errors.Is(err, domain.ErrNotFound) {
+		if _, _, err := s.ClaimPublicEmailDelivery(ctx, owner, []string{first.ProductID}, 10000); !errors.Is(err, domain.ErrNotFound) {
 			t.Fatalf("claimed twice: %v", err)
 		}
-		_, v, err := s.ClaimPublicEmailDelivery(ctx, owner, []string{second.ProductID})
+		_, v, err := s.ClaimPublicEmailDelivery(ctx, owner, []string{second.ProductID}, 10000)
 		var rate *PublicRateLimitError
 		if !errors.As(err, &rate) || v.ID != "" || !rate.RetryAt.Equal(now.Add(time.Second)) {
 			t.Fatalf("global rate boundary: %v", err)
@@ -140,16 +140,20 @@ func TestYDBPublicEmailDelivery(t *testing.T) {
 		c, v := seed()
 		claim(c)
 		now = now.Add(91 * time.Second)
-		got, private, err := s.ClaimPublicEmailDelivery(ctx, publicDeliveryID(t), []string{c.ProductID})
+		got, private, err := s.ClaimPublicEmailDelivery(ctx, publicDeliveryID(t), []string{c.ProductID}, 10000)
 		if err != nil || got.ID != c.ID || got.State != domain.PublicChallengeDeliveryUncertain || private.ID != "" {
 			t.Fatalf("interrupted claim: %v", err)
+		}
+		assertScrubbed(c.ID, domain.PublicChallengeDeliveryUncertain, true)
+		if err := s.DeferPublicEmailDelivery(ctx, c.ID, owner, now.Add(time.Minute)); err != nil {
+			t.Fatal(err)
 		}
 		assertScrubbed(c.ID, domain.PublicChallengeDeliveryUncertain, true)
 		if err := s.FinishPublicEmailDelivery(ctx, c.ID, owner, domain.PublicChallengeDelivered); err != nil {
 			t.Fatal(err)
 		}
 		assertScrubbed(c.ID, domain.PublicChallengeDeliveryUncertain, true)
-		if _, _, err := s.ClaimPublicEmailDelivery(ctx, owner, []string{c.ProductID}); !errors.Is(err, domain.ErrNotFound) {
+		if _, _, err := s.ClaimPublicEmailDelivery(ctx, owner, []string{c.ProductID}, 10000); !errors.Is(err, domain.ErrNotFound) {
 			t.Fatalf("uncertain message requeued: %v", err)
 		}
 		complete(c, v)
@@ -175,7 +179,7 @@ func TestYDBPublicEmailDelivery(t *testing.T) {
 		if err := s.Client().Exec(ctx, `DECLARE $id AS Utf8; UPDATE public_email_challenges SET mail_claim_until=NULL WHERE id=$id;`, query.WithParameters(ydb.ParamsBuilder().Param("$id").Text(c.ID).Build()), query.WithTxControl(query.SerializableReadWriteTxControl(query.CommitTx()))); err != nil {
 			t.Fatal(err)
 		}
-		got, v, err := s.ClaimPublicEmailDelivery(ctx, owner, []string{queued.ProductID, c.ProductID})
+		got, v, err := s.ClaimPublicEmailDelivery(ctx, owner, []string{queued.ProductID, c.ProductID}, 10000)
 		if err != nil || got.ID != c.ID || got.State != domain.PublicChallengeDeliveryUncertain || v.ID != "" {
 			t.Fatalf("interrupted priority: %v", err)
 		}
@@ -207,14 +211,14 @@ func TestYDBPublicEmailDelivery(t *testing.T) {
 		if err := s.Client().Exec(ctx, `DECLARE $product AS Utf8; DECLARE $installation AS Utf8; DELETE FROM public_registration_flows WHERE product_id=$product AND installation_id=$installation;`, query.WithParameters(ydb.ParamsBuilder().Param("$product").Text(c.ProductID).Param("$installation").Text(c.InstallationID).Build()), query.WithTxControl(query.SerializableReadWriteTxControl(query.CommitTx()))); err != nil {
 			t.Fatal(err)
 		}
-		got, v, err := s.ClaimPublicEmailDelivery(ctx, owner, []string{c.ProductID})
+		got, v, err := s.ClaimPublicEmailDelivery(ctx, owner, []string{c.ProductID}, 10000)
 		if err != nil || got.State != domain.PublicChallengeCancelled || v.ID != "" {
 			t.Fatalf("superseded: %v", err)
 		}
 		assertScrubbed(c.ID, domain.PublicChallengeCancelled, false)
 		c, _ = seed()
 		now = c.ExpiresAt
-		got, v, err = s.ClaimPublicEmailDelivery(ctx, owner, []string{c.ProductID})
+		got, v, err = s.ClaimPublicEmailDelivery(ctx, owner, []string{c.ProductID}, 10000)
 		if err != nil || got.State != domain.PublicChallengeExpired || v.ID != "" {
 			t.Fatalf("expired: %v", err)
 		}

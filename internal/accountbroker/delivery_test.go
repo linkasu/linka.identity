@@ -3,8 +3,11 @@ package accountbroker
 import (
 	"context"
 	"errors"
+	"net/textproto"
 	"testing"
+	"time"
 
+	"github.com/linka-cloud/linka.identity/internal/accountmail"
 	"github.com/linka-cloud/linka.identity/internal/domain"
 )
 
@@ -13,6 +16,29 @@ type fixtureMail struct {
 	err   error
 	body  string
 	to    string
+}
+
+func TestOTPTemporaryRejectionStaysQueuedWithoutLosingTheCode(t *testing.T) {
+	b, repository, _, input := newBeginBroker(t)
+	response, err := b.Begin(context.Background(), "fixture-installation-refresh", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &fixtureMail{err: errors.Join(&accountmail.DeliveryError{Stage: "recipient"}, &textproto.Error{Code: 451})}
+	if worked, err := b.ProcessEmail(context.Background(), sender, "42146367-e93b-4114-8299-64c13f2760d1"); err != nil || !worked || sender.calls != 1 {
+		t.Fatalf("temporary rejection was not handled: %v", err)
+	}
+	queued := repository.rows[response.ChallengeID]
+	if queued.State != domain.PublicChallengeRequested || len(queued.Code.Data) == 0 || len(queued.CodeHash) == 0 || !queued.MailAvailableAt.After(time.Now().UTC()) || !queued.ExpiresAt.Equal(queued.CreatedAt.Add(domain.PublicEmailQueueTTL)) {
+		t.Fatal("temporary rejection lost its queued proof or deadline")
+	}
+	polled, err := b.Begin(context.Background(), "fixture-installation-refresh", input)
+	if err != nil || polled.Status != "queued" || repository.creates != 1 {
+		t.Fatalf("idempotent status poll recreated the message: %v", err)
+	}
+	if worked, err := b.ProcessEmail(context.Background(), sender, "2a8992f8-cdd0-422e-9292-1308ec863633"); err != nil || worked || sender.calls != 1 {
+		t.Fatal("deferred delivery retried before its server deadline")
+	}
 }
 
 func (m *fixtureMail) Send(_ context.Context, to, _, body string) error {

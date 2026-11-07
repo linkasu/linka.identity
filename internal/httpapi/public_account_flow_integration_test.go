@@ -72,9 +72,9 @@ func TestPublicAccountFlowIntegration(t *testing.T) {
 	if err := database.Ready(ctx); err != nil {
 		t.Fatal(err)
 	}
-	row, err := database.Client().QueryRow(ctx, `DECLARE $from AS Timestamp;
-SELECT COUNT(*) FROM public_auth_events WHERE bucket='otp-request:global' AND created_at >= $from;`,
-		query.WithParameters(ydb.ParamsBuilder().Param("$from").Timestamp(time.Now().UTC().Add(-24*time.Hour)).Build()),
+	row, err := database.Client().QueryRow(ctx, `DECLARE $now AS Timestamp;
+SELECT COUNT(*) FROM public_email_challenges WHERE state IN ('requested','delivering') AND expires_at > $now;`,
+		query.WithParameters(ydb.ParamsBuilder().Param("$now").Timestamp(time.Now().UTC()).Build()),
 		query.WithTxControl(query.SnapshotReadOnlyTxControl()))
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +84,7 @@ SELECT COUNT(*) FROM public_auth_events WHERE bucket='otp-request:global' AND cr
 		t.Fatal(err)
 	}
 	if used > 198 {
-		t.Fatal("local fixture has insufficient remaining global daily budget for two synthetic challenges; do not reset shared limiter state")
+		t.Fatal("local fixture has insufficient queue capacity for two synthetic challenges; do not reset shared queue state")
 	}
 
 	for _, mode := range []string{"refresh_replay", "explicit_revoke"} {
@@ -213,7 +213,7 @@ func publicFlowScenario(t *testing.T, ctx context.Context, database *store.Store
 	request("POST", "/v1/public/email/challenges", installation.RefreshToken, "https://attacker.example.test", begin, 403, nil)
 	var challenge accountbroker.ChallengeResponse
 	public("POST", "/v1/public/email/challenges", installation.RefreshToken, begin, 202, &challenge)
-	if challenge.ChallengeID != begin.RequestID || challenge.Status != "pending" || challenge.ContractVersion != 1 || !challenge.ExpiresAt.After(time.Now()) {
+	if challenge.ChallengeID != begin.RequestID || challenge.Status != "queued" || challenge.ContractVersion != 1 || !challenge.ExpiresAt.After(time.Now().Add(47*time.Hour)) {
 		t.Fatal("invalid generic challenge contract")
 	}
 	mail := &publicFlowMail{}

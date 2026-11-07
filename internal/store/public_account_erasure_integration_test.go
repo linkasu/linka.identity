@@ -35,7 +35,7 @@ func TestYDBPublicAccountErasure(t *testing.T) {
 		assertPublicErasureCount(t, ctx, db, "account_refresh_tokens", "session_id", f.session, 0)
 		assertPublicErasureCount(t, ctx, db, "public_registration_flows", "installation_id", f.installation, 0)
 		assertPublicChallengeErased(t, ctx, db, challenge.ID)
-		assertPublicErasureCount(t, ctx, db, "public_auth_events", "event_id", challenge.ID, 4)
+		assertPublicErasureCount(t, ctx, db, "public_auth_events", "event_id", challenge.ID, 2)
 		assertPublicErasureCount(t, ctx, db, "public_account_audit", "session_id", f.session, 0)
 		assertPublicErasureCount(t, ctx, db, "product_accounts", "account_id", f.account, 1)
 		if _, _, err := db.AuthorizedPublicAccountSession(ctx, other.session, other.product); err != nil {

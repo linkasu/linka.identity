@@ -2,6 +2,9 @@ package domain
 
 import "time"
 
+const PublicEmailQueueTTL = 48 * time.Hour
+const PublicEmailCodeTTL = 10 * time.Minute
+
 type PublicChallengeState string
 
 const (

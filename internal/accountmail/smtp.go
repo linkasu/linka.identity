@@ -127,6 +127,16 @@ func Uncertain(err error) bool {
 	return true
 }
 
+// Temporary permits retry only after an explicit negative 4xx SMTP reply.
+// A transport failure after DATA may have delivered mail and is never retried.
+func Temporary(err error) bool {
+	if err == nil || Uncertain(err) {
+		return false
+	}
+	var rejection *textproto.Error
+	return errors.As(err, &rejection) && rejection != nil && rejection.Code >= 400 && rejection.Code < 500
+}
+
 type smtpSubmission interface {
 	Mail(string) error
 	Rcpt(string) error

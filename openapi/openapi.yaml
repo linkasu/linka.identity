@@ -189,8 +189,22 @@ paths:
       summary: Begin product registration using an installation refresh JWT
       description: >-
         Strict non-null JSON object, at most 4096 bytes; no query parameters.
-        Exact request_id/body retries return the same generic pending response;
-        changed bindings return 409. Acceptance does not prove delivery or account existence.
+        Begin queues delivery for at most 48 hours without reserving provider daily
+        quota. First status is queued. Exact request_id/body retries poll current
+        status without charging again or resetting time/queue position; no GET route.
+        Changed bindings return 409. Contact anti-abuse remains 6 per 15 minutes
+        with a 60-second resend floor. Global requested/delivering queue capacity
+        equals PUBLIC_ACCOUNT_DAILY_LIMIT (default 200); a full queue rejects new
+        requests with 429 and Retry-After 60, not acceptance. Before SMTP claim,
+        reserve rolling-24h attempts (default 200) and 1/s; these do not reserve
+        quotas for other cloud SMTP users. Code validity begins at claim, not Begin:
+        challenge and private verification atomically receive a 10-minute window.
+        Only a definite negative SMTP 4xx with no acceptance defers the same queued
+        job for 5 minutes, preserving encrypted code, CreatedAt and the 48-hour
+        deadline; the next claim starts a new 10-minute window. mailAttempts is
+        monotonic; no quota refunds. Network/EOF/uncertain outcomes never trigger
+        automatic SMTP retry. Queue expiry is terminal and scrubs proofs/code.
+        Acceptance does not prove delivery or account existence.
       security:
         - refreshBearer: []
       requestBody:
@@ -201,7 +215,7 @@ paths:
               $ref: "#/components/schemas/PublicAccountChallengeRequest"
       responses:
         "202":
-          description: Generic pending challenge, not an ownership proof
+          description: Queued challenge or current status on exact Begin retry; not an ownership proof
           content:
             application/json:
               schema:
@@ -215,7 +229,17 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
         "429":
-          $ref: "#/components/responses/TooManyRequests"
+          description: rate_limited; full queue rejects new work with Retry-After 60; other anti-abuse limits may differ
+          headers:
+            Retry-After:
+              description: Seconds until retry; 60 when queue capacity is full
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "503":
           $ref: "#/components/responses/AccountUnavailable"
     options: &publicAccountPreflight
@@ -934,13 +958,19 @@ components:
         challenge_id:
           $ref: "#/components/schemas/UUID"
         status:
-          const: pending
+          type: string
+          enum: [queued, pending, verified, delivery_failed, expired, locked, cancelled]
+          description: >-
+            queued while requested/deferred; pending after SMTP claim or when
+            delivered/delivery_uncertain; verified when consumed; other states are terminal.
         expires_at:
           type: string
           format: date-time
+          description: Immutable 48-hour queue deadline when queued; actual code deadline (10 minutes from claim) when pending.
         resend_after:
           type: string
           format: date-time
+          description: Resend anti-abuse floor, not a delivery estimate or a reason to create a new request while queued.
     PublicAccountVerifyRequest:
       type: object
       additionalProperties: false

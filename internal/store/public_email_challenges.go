@@ -81,39 +81,57 @@ func (s *Store) CreatePublicEmailChallenge(ctx context.Context, input PublicEmai
 			return err
 		}
 		now := s.now().UTC().Truncate(time.Microsecond)
-		if !input.ExpiresAt.After(now) || input.ExpiresAt.After(now.Add(10*time.Minute)) {
+		if !input.ExpiresAt.After(now) || input.ExpiresAt.After(now.Add(domain.PublicEmailQueueTTL)) || input.ExpiresAt.After(input.CreatedAt.Add(domain.PublicEmailQueueTTL)) {
 			return domain.ErrInvalid
 		}
-		contact := input.ProductID + ":" + hex.EncodeToString(input.EmailBlindIndex)
-		if err := consumePublicAuthLimits(ctx, tx, now, input.ID, []publicAuthLimit{
-			{Bucket: "otp-request:global", Window: 24 * time.Hour, Max: dailyLimit},
-			{Bucket: "otp-request:product:" + input.ProductID, Window: 24 * time.Hour, Max: dailyLimit},
-			{Bucket: "otp-request:contact:" + contact, Window: 15 * time.Minute, Max: 6},
-			{Bucket: "otp-resend:" + contact, Window: time.Minute, Max: 1},
-		}); err != nil {
-			return err
-		}
-		var previousID string
+		var previous PublicEmailChallenge
 		var sessionID *string
 		var flowVersion uint64
 		flow, err := tx.QueryRow(ctx, `DECLARE $product AS Utf8; DECLARE $installation AS Utf8;
 SELECT challenge_id,session_id,version FROM public_registration_flows WHERE product_id=$product AND installation_id=$installation;`,
 			query.WithParameters(ydb.ParamsBuilder().Param("$product").Text(input.ProductID).Param("$installation").Text(input.InstallationID).Build()))
 		if err == nil {
+			var previousID string
 			if err := flow.Scan(&previousID, &sessionID, &flowVersion); err != nil {
 				return err
 			}
-			previous, err := readPublicChallenge(ctx, tx, previousID)
+			previous, err = readPublicChallenge(ctx, tx, previousID)
 			if err != nil && !errors.Is(err, domain.ErrNotFound) {
 				return err
 			}
-			if err == nil && domain.CanTransitionPublicChallenge(previous.State, domain.PublicChallengeCancelled) {
-				if err := cancelPublicChallenge(ctx, tx, previous, now); err != nil {
-					return err
-				}
-			}
 		} else if !errors.Is(err, query.ErrNoRows) {
 			return err
+		}
+		canCancelPrevious := previous.ProductID == input.ProductID && previous.InstallationID == input.InstallationID && domain.CanTransitionPublicChallenge(previous.State, domain.PublicChallengeCancelled)
+		// A serializable range read also prevents concurrent queue-capacity phantoms.
+		row, err := tx.QueryRow(ctx, `DECLARE $now AS Timestamp;
+SELECT COUNT(*) FROM public_email_challenges WHERE state IN ('requested','delivering') AND expires_at > $now;`,
+			query.WithParameters(ydb.ParamsBuilder().Param("$now").Timestamp(now).Build()))
+		if err != nil {
+			return err
+		}
+		var pending uint64
+		if err := row.Scan(&pending); err != nil {
+			return err
+		}
+		// A same-installation correction replaces its own live slot atomically.
+		if canCancelPrevious && (previous.State == domain.PublicChallengeRequested || previous.State == domain.PublicChallengeDelivering) && previous.ExpiresAt.After(now) && pending > 0 {
+			pending--
+		}
+		if pending >= dailyLimit {
+			return &PublicRateLimitError{RetryAt: now.Add(time.Minute)}
+		}
+		contact := input.ProductID + ":" + hex.EncodeToString(input.EmailBlindIndex)
+		if err := consumePublicAuthLimits(ctx, tx, now, input.ID, []publicAuthLimit{
+			{Bucket: "otp-request:contact:" + contact, Window: 15 * time.Minute, Max: 6},
+			{Bucket: "otp-resend:" + contact, Window: time.Minute, Max: 1},
+		}); err != nil {
+			return err
+		}
+		if canCancelPrevious {
+			if err := cancelPublicChallenge(ctx, tx, previous, now); err != nil {
+				return err
+			}
 		}
 		if flowVersion == math.MaxUint64 {
 			return domain.ErrConflict
