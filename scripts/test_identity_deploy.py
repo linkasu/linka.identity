@@ -77,7 +77,7 @@ class IdentityDeployTests(unittest.TestCase):
         self.assertIn('--workflow ci.yml --commit "$DEPLOY_REF"', ci)
         self.assertIn('.headSha == $ref and .conclusion == "success"', ci)
         self.assertIn("actions: read", WORKFLOW)
-        self.assertIn("const Version = uint64(2)", WORKFLOW)
+        self.assertIn("const Version = uint64(3)", WORKFLOW)
         schema = step("Check schema from exact image digest without migration")
         self.assertIn("if: inputs.mode == 'normal'", schema)
         self.assertIn('"$IMAGE_REF" -check', schema)
