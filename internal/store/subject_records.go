@@ -110,6 +110,10 @@ func (s *Store) SetTelemetryPreference(ctx context.Context, subject Subject, sub
 		if err := validateSubjectWith(ctx, tx, subject, productID); err != nil {
 			return err
 		}
+		if managed, _, err := legacyManagedConsentWith(ctx, tx, subject, subjectKey, productID,
+			preference, "", recordedAt, eventID, s.now().UTC(), false); managed || err != nil {
+			return err
+		}
 		var previous string
 		var previousAt time.Time
 		var version uint64

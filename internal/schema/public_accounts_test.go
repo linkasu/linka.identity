@@ -51,8 +51,8 @@ func TestPublicAccountsUpgradePreservesVersionUntilDDLComplete(t *testing.T) {
 		t.Fatal("partial public-account DDL must not promote the schema version")
 	}
 	e.fail, e.commands = "", nil
-	if err := Apply(t.Context(), e, time.Now().UTC()); err != nil || e.version != 2 {
-		t.Fatalf("schema 1 must upgrade to schema 2 after all DDL: version=%d error=%v", e.version, err)
+	if err := Apply(t.Context(), e, time.Now().UTC()); err != nil || e.version != Version {
+		t.Fatalf("schema 1 must upgrade after all DDL: version=%d error=%v", e.version, err)
 	}
 	joined := strings.Join(e.commands, "\n")
 	for _, table := range []string{"public_email_challenges", "public_registration_flows", "product_accounts", "account_sessions", "account_refresh_tokens", "public_auth_events", "public_account_audit"} {
@@ -67,13 +67,13 @@ func TestPublicAccountsUpgradePreservesVersionUntilDDLComplete(t *testing.T) {
 
 func TestPublicAccountsSchemaFreshRepeatAndUnknownVersions(t *testing.T) {
 	e := &migrationExecutor{}
-	if err := Apply(t.Context(), e, time.Now().UTC()); err != nil || e.version != 2 {
+	if err := Apply(t.Context(), e, time.Now().UTC()); err != nil || e.version != Version {
 		t.Fatalf("fresh schema: version=%d error=%v", e.version, err)
 	}
-	if err := Apply(t.Context(), e, time.Now().UTC()); err != nil || e.version != 2 {
+	if err := Apply(t.Context(), e, time.Now().UTC()); err != nil || e.version != Version {
 		t.Fatalf("repeated migration: %v", err)
 	}
-	for _, version := range []uint64{0, 3, ^uint64(0)} {
+	for _, version := range []uint64{0, 4, ^uint64(0)} {
 		e := &migrationExecutor{exists: true, version: version}
 		if err := Apply(t.Context(), e, time.Now().UTC()); err == nil || e.version != version || len(e.commands) != 1 {
 			t.Fatalf("unknown version must remain untouched: %d error=%v", version, err)

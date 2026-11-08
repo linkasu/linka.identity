@@ -151,12 +151,36 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
     options: *publicInstallationPreflight
   /v1/public/installations/telemetry-preference:
+    get:
+      operationId: getPublicInstallationTelemetry
+      summary: Read authoritative installation consent and delivery state
+      description: No body or query parameters. Unmanaged unknown bootstrap is version 1, epoch 0, completed with null token. Managed tokens require allowed and latest event delivered; higher privacy suppression always wins.
+      security:
+        - refreshBearer: []
+      responses:
+        "200":
+          description: Current consent; pending never includes a token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicManagedPreferenceResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
     put:
-      operationId: denyPublicInstallationTelemetry
-      summary: Durably deny telemetry for an anonymous installation
+      operationId: setPublicInstallationTelemetry
+      summary: Set versioned consent or retain legacy denial-only behavior
       description: >-
-        Denial triggers the existing Metrics suppression outbox. Re-enabling the
-        suppressed subject is forbidden; explicit later consent creates a new installation.
+        Legacy body remains denial-only with its old timestamp rules and response.
+        Either new field requires both request_id and expected_version. Versioned
+        decisions use CAS, credential policy and recorded_at in [2020,2100), no
+        older-than-24h floor and at most 5 minutes in the future. Exact replay returns
+        CURRENT authoritative state; changed semantic body or stale CAS returns 409.
+        Grants cannot bypass permanent legacy, person/global or deletion suppression.
+        Denial closes the same epoch; a subsequent grant increments it. No new identity is created.
       security:
         - refreshBearer: []
       requestBody:
@@ -164,14 +188,18 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/PublicPreferenceRequest"
+              oneOf:
+                - $ref: "#/components/schemas/PublicPreferenceRequest"
+                - $ref: "#/components/schemas/PublicVersionedPreferenceRequest"
       responses:
         "200":
-          description: Telemetry denied and suppression queued
+          description: Legacy denial or current managed state; token only after completed delivery
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/PublicPreferenceResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/PublicPreferenceResponse"
+                  - $ref: "#/components/schemas/PublicManagedPreferenceResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -258,7 +286,7 @@ paths:
               description: Echoed only for an allowed nonempty Origin
             Access-Control-Allow-Methods:
               schema:
-                const: POST, PUT, OPTIONS
+                const: GET, POST, PUT, OPTIONS
             Access-Control-Allow-Headers:
               schema:
                 const: Authorization, Content-Type
@@ -1340,6 +1368,11 @@ components:
       additionalProperties: false
       required: [installation_key, product, metrics_token]
       properties:
+        consent_epoch:
+          type: integer
+          minimum: 1
+          maximum: 18446744073709551615
+          description: Present only for managed consent; same positive epoch is signed into the JWT. Managed issuance requires allowed plus latest event delivered.
         installation_key:
           $ref: "#/components/schemas/OpaqueKey"
         product:
@@ -1386,6 +1419,58 @@ components:
         recorded_at:
           type: string
           format: date-time
+    PublicVersionedPreferenceRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, expected_version, preference, policy_version, recorded_at]
+      properties:
+        request_id:
+          type: string
+          format: uuid
+        expected_version:
+          type: integer
+          minimum: 1
+          maximum: 18446744073709551615
+        preference:
+          enum: [allowed, denied]
+        policy_version:
+          type: string
+          minLength: 1
+          maxLength: 100
+        recorded_at:
+          type: string
+          format: date-time
+          pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$'
+    PublicManagedPreferenceResponse:
+      type: object
+      additionalProperties: false
+      required: [installation_key, product, preference, policy_version, recorded_at, version, consent_epoch, delivery_state, metrics_token]
+      properties:
+        installation_key:
+          $ref: "#/components/schemas/OpaqueKey"
+        product:
+          $ref: "#/components/schemas/ProductID"
+        preference:
+          enum: [unknown, allowed, denied]
+        policy_version:
+          type: string
+        recorded_at:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          minimum: 1
+          maximum: 18446744073709551615
+        consent_epoch:
+          type: integer
+          minimum: 0
+          maximum: 18446744073709551615
+        delivery_state:
+          enum: [pending, completed]
+        metrics_token:
+          oneOf:
+            - $ref: "#/components/schemas/PublicAccessToken"
+            - type: "null"
     EmailVerificationRequest:
       type: object
       additionalProperties: false

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -89,6 +90,36 @@ func (s *Server) setPublicTelemetryPreference(w http.ResponseWriter, r *http.Req
 
 func (s *Server) publicPreflight(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) getPublicTelemetryPreference(w http.ResponseWriter, r *http.Request) {
+	if r.URL.RawQuery != "" || r.URL.ForceQuery {
+		s.fail(w, r, domain.ErrInvalid)
+		return
+	}
+	if r.Body != nil {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1))
+		if err != nil || len(body) != 0 {
+			s.fail(w, r, domain.ErrInvalid)
+			return
+		}
+	}
+	credential, ok := bearerCredential(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "invalid_refresh_credential"})
+		return
+	}
+	result, err := s.publicBroker.GetPreference(r.Context(), credential)
+	if errors.Is(err, installationbroker.ErrInvalidCredential) {
+		writeJSON(w, http.StatusUnauthorized, errorResponse{Error: "invalid_refresh_credential"})
+		return
+	}
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, result)
 }
 
 func bearerCredential(r *http.Request) (string, bool) {

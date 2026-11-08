@@ -35,6 +35,7 @@ type Claims struct {
 	PersonKey     *string  `json:"person_key,omitempty"`
 	OrgKey        *string  `json:"org_key,omitempty"`
 	PolicyVersion string   `json:"policy_version,omitempty"`
+	ConsentEpoch  uint64   `json:"consent_epoch,omitempty"`
 	IssuedAt      int64    `json:"iat"`
 	ExpiresAt     int64    `json:"exp"`
 	TokenID       string   `json:"jti"`
@@ -49,6 +50,7 @@ type SignInput struct {
 	PersonKey     *string
 	OrgKey        *string
 	PolicyVersion string
+	ConsentEpoch  uint64
 	TTL           time.Duration
 }
 
@@ -136,6 +138,7 @@ func (s *Signer) signClaims(input SignInput) (string, time.Time, error) {
 		PersonKey:     input.PersonKey,
 		OrgKey:        input.OrgKey,
 		PolicyVersion: input.PolicyVersion,
+		ConsentEpoch:  input.ConsentEpoch,
 		IssuedAt:      now.Unix(),
 		ExpiresAt:     expiresAt.Unix(),
 		TokenID:       tokenID,

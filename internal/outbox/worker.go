@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/linka-cloud/linka.identity/internal/store"
@@ -112,14 +113,18 @@ func (w *Worker) deliver(ctx context.Context, event store.OutboxEvent) (json.Raw
 	if !ok || payload.Scope.SubjectKey == "" {
 		return nil, errors.New("outbox payload has unknown product scope")
 	}
+	target, scope, err := deliveryTarget(w.url, event.Topic)
+	if err != nil {
+		return nil, err
+	}
 	accessToken, _, err := w.signer.SignClaims(token.SignInput{
 		Audience: audience, Product: payload.Scope.Product, Subject: payload.Scope.SubjectKey,
-		SubjectType: "service", Scopes: []string{"privacy:write"},
+		SubjectType: "service", Scopes: []string{scope},
 	})
 	if err != nil {
 		return nil, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, w.url, bytes.NewReader(event.Payload))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(event.Payload))
 	if err != nil {
 		return nil, err
 	}
@@ -149,6 +154,19 @@ func (w *Worker) deliver(ctx context.Context, event store.OutboxEvent) (json.Raw
 		return receipt, errDeliveryPending
 	}
 	return receipt, nil
+}
+
+func deliveryTarget(configured, topic string) (string, string, error) {
+	if topic != "telemetry.consent.changed" {
+		return configured, "privacy:write", nil
+	}
+	target, err := url.Parse(configured)
+	if err != nil || target.Scheme != "https" || target.Host == "" || target.User != nil ||
+		target.Path != "/v2/privacy/requests" || target.RawPath != "" || target.RawQuery != "" || target.ForceQuery || target.Fragment != "" {
+		return "", "", errors.New("consent delivery requires an HTTPS /v2/privacy/requests target")
+	}
+	target.Path = "/v2/consents"
+	return target.String(), "consent:write", nil
 }
 
 func completedReceipt(receipt json.RawMessage, expectedRequestID string) (bool, error) {

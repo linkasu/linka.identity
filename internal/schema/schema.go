@@ -10,7 +10,7 @@ import (
 	"github.com/ydb-platform/ydb-go-sdk/v3/query"
 )
 
-const Version = uint64(2)
+const Version = uint64(3)
 
 var statements = []string{
 	`CREATE TABLE IF NOT EXISTS schema_meta (
@@ -305,7 +305,7 @@ func Apply(ctx context.Context, db Executor, now time.Time) error {
 		if err := row.Scan(&current); err != nil {
 			return fmt.Errorf("scan YDB schema version: %w", err)
 		}
-		if current != 1 && current != Version {
+		if current != 1 && current != 2 && current != Version {
 			return fmt.Errorf("YDB schema version is %d, binary requires %d", current, Version)
 		}
 	} else if !errors.Is(err, query.ErrNoRows) {
@@ -320,6 +320,11 @@ func Apply(ctx context.Context, db Executor, now time.Time) error {
 	for i, statement := range publicAccountStatements {
 		if err := db.Exec(ctx, statement, query.WithTxControl(query.ImplicitTxControl())); err != nil {
 			return fmt.Errorf("apply public account schema statement %d: %w", i+1, err)
+		}
+	}
+	for i, statement := range consentStatements {
+		if err := db.Exec(ctx, statement, query.WithTxControl(query.ImplicitTxControl())); err != nil {
+			return fmt.Errorf("apply consent schema statement %d: %w", i+1, err)
 		}
 	}
 	if current == Version {

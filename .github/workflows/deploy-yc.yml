@@ -77,7 +77,7 @@ jobs:
           ref: ${{ env.DEPLOY_REF }}
           persist-credentials: false
       - name: Require reviewed schema version
-        run: grep -qx 'const Version = uint64(2)' internal/schema/schema.go
+        run: grep -qx 'const Version = uint64(3)' internal/schema/schema.go
       - name: Install YC CLI
         run: curl -fsSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -a
       - name: Configure service account
@@ -246,7 +246,7 @@ jobs:
       - name: Operator action required on failure
         if: failure()
         run: |
-          echo '::error::No automatic rollback or schema mutation. Keep the current revision or explicitly deploy the reviewed maintenance candidate; never restore schema-1 code after migration. Operator investigation is required.'
+          echo '::error::No automatic rollback or schema mutation. Keep the current revision or explicitly deploy the reviewed maintenance candidate; never restore schema-1/2 code after schema-3 migration. Operator investigation is required.'
       - name: Remove deploy service-account key
         if: always()
         run: rm -f /tmp/yc-key.json
