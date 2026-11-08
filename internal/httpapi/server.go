@@ -73,6 +73,7 @@ func New(database *store.Store, identities *service.IdentityService, tokens *tok
 		mux.Handle("POST /v1/public/installations/token", server.public(http.HandlerFunc(server.refreshPublicInstallationToken)))
 		mux.Handle("OPTIONS /v1/public/installations/token", server.public(http.HandlerFunc(server.publicPreflight)))
 		mux.Handle("PUT /v1/public/installations/telemetry-preference", server.public(http.HandlerFunc(server.setPublicTelemetryPreference)))
+		mux.Handle("GET /v1/public/installations/telemetry-preference", server.public(http.HandlerFunc(server.getPublicTelemetryPreference)))
 		mux.Handle("OPTIONS /v1/public/installations/telemetry-preference", server.public(http.HandlerFunc(server.publicPreflight)))
 	}
 	if publicAccounts != nil {
@@ -154,7 +155,7 @@ func (s *Server) public(next http.Handler) http.Handler {
 				return
 			}
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "POST, PUT, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 			w.Header().Set("Vary", "Origin")
 		}

@@ -168,3 +168,12 @@ func (f *refreshTestRepository) GetTelemetryPreference(_ context.Context, subjec
 	}
 	return store.TelemetryPreference{Preference: f.preference}, f.preferenceErr
 }
+
+func (f *refreshTestRepository) GetInstallationConsent(ctx context.Context, subject store.Subject, product string) (store.InstallationConsent, error) {
+	preference, err := f.GetTelemetryPreference(ctx, subject, product)
+	return store.InstallationConsent{Preference: preference.Preference, Version: 1, DeliveryState: "completed"}, err
+}
+
+func (*refreshTestRepository) SetInstallationConsent(context.Context, store.InstallationConsentDecision) (store.InstallationConsent, error) {
+	panic("consent mutation must not be called during refresh")
+}

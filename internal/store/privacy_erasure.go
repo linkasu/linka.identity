@@ -475,7 +475,9 @@ func eraseInstallationRecords(ctx context.Context, tx query.TxActor, installatio
 			DELETE FROM email_verification_audit WHERE installation_id = $id;
 			DELETE FROM organization_submissions WHERE installation_id = $id;
 			DELETE FROM consents WHERE subject_type = "installation" AND subject_id = $id;
-			DELETE FROM telemetry_preferences WHERE subject_type = "installation" AND subject_id = $id;`,
+			DELETE FROM telemetry_preferences WHERE subject_type = "installation" AND subject_id = $id;
+			DELETE FROM installation_consent_epochs WHERE subject_type = "installation" AND subject_id = $id;
+			DELETE FROM installation_consent_requests WHERE subject_id = $id;`,
 			query.WithParameters(ydb.ParamsBuilder().Param("$id").Text(installationID).Build()))
 	}
 	return tx.Exec(ctx, `
@@ -485,7 +487,9 @@ func eraseInstallationRecords(ctx context.Context, tx query.TxActor, installatio
 		DELETE FROM email_verification_audit WHERE installation_id = $id AND product_id = $product_id;
 		DELETE FROM organization_submissions WHERE installation_id = $id AND product_id = $product_id;
 		DELETE FROM consents WHERE subject_type = "installation" AND subject_id = $id AND product_id = $product_id;
-		DELETE FROM telemetry_preferences WHERE subject_type = "installation" AND subject_id = $id AND product_id = $product_id;`,
+		DELETE FROM telemetry_preferences WHERE subject_type = "installation" AND subject_id = $id AND product_id = $product_id;
+		DELETE FROM installation_consent_epochs WHERE subject_type = "installation" AND subject_id = $id AND product_id = $product_id;
+		DELETE FROM installation_consent_requests WHERE subject_id = $id AND product_id = $product_id;`,
 		query.WithParameters(ydb.ParamsBuilder().
 			Param("$id").Text(installationID).
 			Param("$product_id").Text(*productID).

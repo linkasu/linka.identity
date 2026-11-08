@@ -208,6 +208,9 @@ func TestBrokerDoesNotMaskRepositoryFailures(t *testing.T) {
 }
 
 type fakeRepository struct {
+	managed       *store.InstallationConsent
+	decision      store.InstallationConsentDecision
+	decisionErr   error
 	consent       store.Consent
 	installation  store.Installation
 	aliases       map[string]store.ResolvedAlias
@@ -216,6 +219,28 @@ type fakeRepository struct {
 	aliasErr      error
 	preferenceErr error
 	registrations int
+}
+
+func (f *fakeRepository) GetInstallationConsent(ctx context.Context, subject store.Subject, product string) (store.InstallationConsent, error) {
+	preference, err := f.GetTelemetryPreference(ctx, subject, product)
+	if err != nil {
+		return store.InstallationConsent{}, err
+	}
+	if f.managed != nil {
+		return *f.managed, nil
+	}
+	return store.InstallationConsent{Preference: preference.Preference, RecordedAt: preference.RecordedAt, Version: 1, DeliveryState: "completed"}, nil
+}
+
+func (f *fakeRepository) SetInstallationConsent(_ context.Context, input store.InstallationConsentDecision) (store.InstallationConsent, error) {
+	f.decision = input
+	if f.decisionErr != nil {
+		return store.InstallationConsent{}, f.decisionErr
+	}
+	if f.managed == nil {
+		panic("test must configure authoritative managed result")
+	}
+	return *f.managed, nil
 }
 
 func newFakeRepository() *fakeRepository {

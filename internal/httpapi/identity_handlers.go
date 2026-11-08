@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -194,6 +195,21 @@ func (s *Server) issueToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var personKey *string
+	var consentEpoch uint64
+	if resolved.SubjectType == "installation" {
+		state, err := s.store.GetInstallationConsent(r.Context(), store.Subject{Kind: "installation", ID: resolved.SubjectID}, productID)
+		if err != nil && !errors.Is(err, domain.ErrNotFound) {
+			s.fail(w, r, err)
+			return
+		}
+		if err == nil && state.ConsentEpoch > 0 {
+			if state.Preference != "allowed" || state.Suppressed || state.DeliveryState != "completed" {
+				s.fail(w, r, domain.ErrForbidden)
+				return
+			}
+			consentEpoch = state.ConsentEpoch
+		}
+	}
 	if resolved.SubjectType == "account" {
 		value := s.pairwise.Subject(productID, audience, "person", resolved.PersonID)
 		if err := s.store.EnsureSubjectAlias(r.Context(), value, productID, audience, "person", resolved.PersonID); err != nil {
@@ -204,7 +220,7 @@ func (s *Server) issueToken(w http.ResponseWriter, r *http.Request) {
 	}
 	encoded, expiresAt, err := s.tokens.SignClaims(token.SignInput{
 		Audience: audience, Product: productID, Subject: input.SubjectKey, SubjectType: input.SubjectType,
-		Scopes: []string{"telemetry:write"}, PersonKey: personKey, TTL: time.Duration(input.TTLSeconds) * time.Second,
+		Scopes: []string{"telemetry:write"}, PersonKey: personKey, TTL: time.Duration(input.TTLSeconds) * time.Second, ConsentEpoch: consentEpoch,
 	})
 	if err != nil {
 		s.fail(w, r, domain.ErrInvalid)

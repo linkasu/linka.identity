@@ -173,6 +173,11 @@ func (s *Store) DenyPublicInstallation(ctx context.Context, input PublicTelemetr
 		if err := validateSubjectWith(ctx, tx, input.Subject, input.ProductID); err != nil {
 			return err
 		}
+		if managed, state, err := legacyManagedConsentWith(ctx, tx, input.Subject, input.SubjectKey, input.ProductID,
+			"denied", input.Consent.PolicyVersion, input.RecordedAt, input.Consent.ID, s.now().UTC(), true); managed || err != nil {
+			effectiveAt = state.RecordedAt
+			return err
+		}
 		var storedID, previous string
 		var previousAt time.Time
 		var version uint64

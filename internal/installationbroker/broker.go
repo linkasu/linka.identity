@@ -21,7 +21,8 @@ type Repository interface {
 	DenyPublicInstallation(context.Context, store.PublicTelemetryDenial) (time.Time, error)
 	ResolveSubjectAlias(context.Context, string, string, string) (store.ResolvedAlias, error)
 	ResolveTokenSubject(context.Context, string, string, string) error
-	GetTelemetryPreference(context.Context, store.Subject, string) (store.TelemetryPreference, error)
+	GetInstallationConsent(context.Context, store.Subject, string) (store.InstallationConsent, error)
+	SetInstallationConsent(context.Context, store.InstallationConsentDecision) (store.InstallationConsent, error)
 }
 
 type Product struct {
@@ -46,9 +47,11 @@ type RegisterInput struct {
 }
 
 type PreferenceInput struct {
-	Preference    string    `json:"preference"`
-	PolicyVersion string    `json:"policy_version"`
-	RecordedAt    time.Time `json:"recorded_at"`
+	RequestID       *string   `json:"request_id,omitempty"`
+	ExpectedVersion *uint64   `json:"expected_version,omitempty"`
+	Preference      string    `json:"preference"`
+	PolicyVersion   string    `json:"policy_version"`
+	RecordedAt      time.Time `json:"recorded_at"`
 }
 
 type AccessToken struct {
@@ -73,9 +76,11 @@ type TokenResponse struct {
 	InstallationKey string      `json:"installation_key"`
 	Product         string      `json:"product"`
 	MetricsToken    AccessToken `json:"metrics_token"`
+	ConsentEpoch    uint64      `json:"consent_epoch,omitempty"`
 }
 
 type PreferenceResponse struct {
+	*ManagedPreferenceFields
 	InstallationKey string    `json:"installation_key"`
 	Product         string    `json:"product"`
 	Preference      string    `json:"preference"`
@@ -156,7 +161,15 @@ func (b *Broker) Register(ctx context.Context, input RegisterInput) (Registratio
 		RefreshToken: refreshToken, RefreshExpires: refreshExpires,
 	}
 	if input.Preference == "allowed" {
-		access, err := b.issueAccess(input.ProductID, product.Audience, installationKey)
+		state, err := b.repository.GetInstallationConsent(ctx, store.Subject{Kind: "installation", ID: rootID}, input.ProductID)
+		if err != nil {
+			return Registration{}, err
+		}
+		// Registration replay must not bypass a subsequently managed consent.
+		if state.ConsentEpoch > 0 && (state.Preference != "allowed" || state.Suppressed || state.DeliveryState != "completed") {
+			return result, nil
+		}
+		access, err := b.issueEpochAccess(input.ProductID, product.Audience, installationKey, state.ConsentEpoch)
 		if err != nil {
 			return Registration{}, err
 		}
@@ -170,21 +183,24 @@ func (b *Broker) Refresh(ctx context.Context, refreshToken string) (TokenRespons
 	if err != nil {
 		return TokenResponse{}, err
 	}
-	preference, err := b.repository.GetTelemetryPreference(ctx, store.Subject{Kind: "installation", ID: authenticated.alias.SubjectID}, authenticated.productID)
-	if errors.Is(err, domain.ErrNotFound) || (err == nil && preference.Preference != "allowed") {
+	preference, err := b.repository.GetInstallationConsent(ctx, store.Subject{Kind: "installation", ID: authenticated.alias.SubjectID}, authenticated.productID)
+	if errors.Is(err, domain.ErrNotFound) || (err == nil && (preference.Preference != "allowed" || preference.Suppressed || (preference.ConsentEpoch > 0 && preference.DeliveryState != "completed"))) {
 		return TokenResponse{}, domain.ErrForbidden
 	}
 	if err != nil {
 		return TokenResponse{}, err
 	}
-	access, err := b.issueAccess(authenticated.productID, authenticated.audience, authenticated.alias.OpaqueKey)
+	access, err := b.issueEpochAccess(authenticated.productID, authenticated.audience, authenticated.alias.OpaqueKey, preference.ConsentEpoch)
 	if err != nil {
 		return TokenResponse{}, err
 	}
-	return TokenResponse{InstallationKey: authenticated.alias.OpaqueKey, Product: authenticated.productID, MetricsToken: access}, nil
+	return TokenResponse{InstallationKey: authenticated.alias.OpaqueKey, Product: authenticated.productID, MetricsToken: access, ConsentEpoch: preference.ConsentEpoch}, nil
 }
 
 func (b *Broker) SetPreference(ctx context.Context, refreshToken string, input PreferenceInput) (PreferenceResponse, error) {
+	if input.RequestID != nil || input.ExpectedVersion != nil {
+		return b.setVersionedPreference(ctx, refreshToken, input)
+	}
 	if input.Preference != "denied" || !b.validDenial(input.PolicyVersion, input.RecordedAt) {
 		return PreferenceResponse{}, domain.ErrInvalid
 	}
@@ -253,10 +269,11 @@ func (b *Broker) authenticate(ctx context.Context, encoded string) (authenticate
 	return authenticatedInstallation{productID: claims.Product, audience: product.Audience, alias: alias, policyVersion: claims.PolicyVersion}, nil
 }
 
-func (b *Broker) issueAccess(productID, audience, installationKey string) (AccessToken, error) {
+func (b *Broker) issueEpochAccess(productID, audience, installationKey string, epoch uint64) (AccessToken, error) {
 	encoded, expiresAt, err := b.signer.SignClaims(token.SignInput{
 		Audience: audience, Product: productID, Subject: installationKey,
 		SubjectType: "installation", Scopes: []string{"telemetry:write"},
+		ConsentEpoch: epoch,
 	})
 	if err != nil {
 		return AccessToken{}, err

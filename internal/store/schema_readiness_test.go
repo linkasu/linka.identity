@@ -29,7 +29,7 @@ func (r schemaReadinessRow) Scan(values ...any) error {
 func TestPublicAccountBinaryRequiresSchemaTwo(t *testing.T) {
 	for _, version := range []uint64{0, 1, 2, 3, ^uint64(0)} {
 		db := &Store{client: schemaReadinessClient{version: version}}
-		if err := db.Ready(t.Context()); (err == nil) != (version == 2) {
+		if err := db.Ready(t.Context()); (err == nil) != (version == 3) {
 			t.Fatalf("schema %d readiness: %v", version, err)
 		}
 	}
