@@ -143,7 +143,7 @@ func run(logger *slog.Logger) error {
 		}
 		publicAccounts, err = accountbroker.New(accountbroker.Dependencies{
 			Repository: database, Installations: publicBroker, Identity: identityService, Envelope: envelope, Signer: tokenSigner, Pairwise: pairwiseIDs,
-		}, accountbroker.Config{Products: publicProducts, RegistrationProducts: cfg.PublicAccounts.Products,
+		}, accountbroker.Config{Logger: logger, Products: publicProducts, RegistrationProducts: cfg.PublicAccounts.Products,
 			RegistrationPolicyVersion: cfg.PublicAccounts.PolicyVersion, OTPKeyID: cfg.PublicAccounts.OTPKeyID, OTPKey: cfg.PublicAccounts.OTPKey, DailyLimit: uint64(cfg.PublicAccounts.DailyLimit)})
 		if err != nil {
 			return fmt.Errorf("public product account broker: %w", err)

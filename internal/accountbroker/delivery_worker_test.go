@@ -8,8 +8,43 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linka-cloud/linka.identity/internal/accountmail"
+	"github.com/linka-cloud/linka.identity/internal/domain"
 	"github.com/linka-cloud/linka.identity/internal/store"
 )
+
+func TestDeliveryWorkerContinuesBatchAfterTerminalFailure(t *testing.T) {
+	for _, beforeSMTP := range []bool{false, true} {
+		b, repository, _, input := newBeginBroker(t)
+		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+		b.logger = logger
+		if _, err := b.Begin(context.Background(), "fixture-installation-refresh", input); err != nil {
+			t.Fatal(err)
+		}
+		input.RequestID = "42146367-e93b-4114-8299-64c13f2760d1"
+		if _, err := b.Begin(context.Background(), "fixture-installation-refresh", input); err != nil {
+			t.Fatal(err)
+		}
+		wantCalls := 2
+		if beforeSMTP {
+			b.otpKeyID = "different-key"
+			wantCalls = 0
+		}
+		sender := &fixtureMail{err: &accountmail.DeliveryError{Stage: "recipient"}}
+		worker, err := NewDeliveryWorker(b, sender, logger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := worker.Process(context.Background()); err != nil || repository.claimCalls != 3 || sender.calls != wantCalls {
+			t.Fatal("terminal failure changed worker batch progression")
+		}
+		for _, row := range repository.rows {
+			if row.State != domain.PublicChallengeDeliveryFailed {
+				t.Fatal("batch did not finish both failed deliveries")
+			}
+		}
+	}
+}
 
 func TestDeliveryWorkerWaitsForDurableCreditAndHonorsContext(t *testing.T) {
 	b, repository, _, input := newBeginBroker(t)
