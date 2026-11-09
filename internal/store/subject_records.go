@@ -231,6 +231,20 @@ func (s *Store) GetTelemetryPreference(ctx context.Context, subject Subject, pro
 }
 
 func (s *Store) CreatePrivacyRequest(ctx context.Context, request PrivacyRequest, products map[string]string) (PrivacyRequestStatus, bool, error) {
+	var result PrivacyRequestStatus
+	var created bool
+	err := s.serializable(ctx, func(ctx context.Context, tx query.TxActor) error {
+		var err error
+		result, created, err = s.createPrivacyRequest(ctx, tx, request, products)
+		return err
+	})
+	if err != nil {
+		return PrivacyRequestStatus{}, false, err
+	}
+	return result, created, nil
+}
+
+func (s *Store) createPrivacyRequest(ctx context.Context, tx query.TxActor, request PrivacyRequest, products map[string]string) (PrivacyRequestStatus, bool, error) {
 	productID := ""
 	if request.ProductID != nil {
 		productID = *request.ProductID
@@ -244,7 +258,7 @@ func (s *Store) CreatePrivacyRequest(ctx context.Context, request PrivacyRequest
 	}
 	var result PrivacyRequestStatus
 	var created bool
-	err = s.serializable(ctx, func(ctx context.Context, tx query.TxActor) error {
+	err = func() error {
 		created = false
 		row, err := tx.QueryRow(ctx, `
 			DECLARE $workload AS Utf8;
@@ -369,7 +383,7 @@ func (s *Store) CreatePrivacyRequest(ctx context.Context, request PrivacyRequest
 		result = PrivacyRequestStatus{ID: requestID, RequestType: request.RequestType, Scope: request.Scope, ProductID: request.ProductID, Status: "requested", RequestedAt: request.RequestedAt}
 		created = true
 		return nil
-	})
+	}()
 	if err != nil {
 		return PrivacyRequestStatus{}, false, err
 	}

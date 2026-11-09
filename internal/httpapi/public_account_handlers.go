@@ -19,6 +19,8 @@ type PublicAccountBroker interface {
 	Refresh(context.Context, string) (accountbroker.Registration, error)
 	Revoke(context.Context, string) error
 	UpdateProfile(context.Context, string, accountbroker.ProfileInput) (accountbroker.Profile, error)
+	CreateDeletion(context.Context, string, accountbroker.DeletionInput) (accountbroker.DeletionStatus, error)
+	DeletionStatus(context.Context, string, accountbroker.DeletionStatusInput) (accountbroker.DeletionStatus, error)
 }
 
 func (s *Server) publicAccountPreflight(w http.ResponseWriter, r *http.Request) {

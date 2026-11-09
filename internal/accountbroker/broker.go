@@ -35,6 +35,8 @@ type Repository interface {
 	RotatePublicAccountRefresh(context.Context, []byte, []byte) (store.AccountSession, store.ProductAccount, error)
 	RevokePublicAccountSession(context.Context, string, string) error
 	UpdatePublicAccountProfile(context.Context, string, string, uint64, string, string, string) (store.ProductAccount, error)
+	CreatePublicAccountDeletion(context.Context, store.PublicAccountDeletion, map[string]string) (store.PrivacyRequestStatus, error)
+	PublicAccountDeletionStatus(context.Context, string, string, string) (store.PrivacyRequestStatus, error)
 	ClaimPublicEmailDelivery(context.Context, string, []string, uint64) (store.PublicEmailChallenge, store.EmailVerification, error)
 	FinishPublicEmailDelivery(context.Context, string, string, domain.PublicChallengeState) error
 	DeferPublicEmailDelivery(context.Context, string, string, time.Time) error

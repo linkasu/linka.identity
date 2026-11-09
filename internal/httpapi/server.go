@@ -77,6 +77,10 @@ func New(database *store.Store, identities *service.IdentityService, tokens *tok
 		mux.Handle("OPTIONS /v1/public/installations/telemetry-preference", server.public(http.HandlerFunc(server.publicPreflight)))
 	}
 	if publicAccounts != nil {
+		mux.Handle("POST /v1/public/account-deletions", server.public(http.HandlerFunc(server.createPublicAccountDeletion)))
+		mux.Handle("OPTIONS /v1/public/account-deletions", server.public(http.HandlerFunc(server.publicAccountPreflight)))
+		mux.Handle("POST /v1/public/account-deletions/status", server.public(http.HandlerFunc(server.publicAccountDeletionStatus)))
+		mux.Handle("OPTIONS /v1/public/account-deletions/status", server.public(http.HandlerFunc(server.publicAccountPreflight)))
 		mux.Handle("POST /v1/public/email/challenges", server.public(http.HandlerFunc(server.beginPublicAccountChallenge)))
 		mux.Handle("OPTIONS /v1/public/email/challenges", server.public(http.HandlerFunc(server.publicAccountPreflight)))
 		mux.Handle("POST /v1/public/email/challenges/{id}/verify", server.public(http.HandlerFunc(server.verifyPublicAccountChallenge)))
