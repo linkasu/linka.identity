@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"strings"
 	"time"
@@ -53,6 +54,7 @@ type Dependencies struct {
 }
 
 type Config struct {
+	Logger                    *slog.Logger
 	Products                  map[string]installationbroker.Product
 	RegistrationProducts      map[string]struct{}
 	RegistrationPolicyVersion string
@@ -74,6 +76,7 @@ type Broker struct {
 	otpKeyID      string
 	otpKey        []byte
 	dailyLimit    uint64
+	logger        *slog.Logger
 	now           func() time.Time
 }
 
@@ -88,6 +91,9 @@ func New(deps Dependencies, config Config) (*Broker, error) {
 	}
 	if config.DailyLimit == 0 {
 		config.DailyLimit = 200
+	}
+	if config.Logger == nil {
+		config.Logger = slog.Default()
 	}
 	products, allowed := make(map[string]string, len(config.Products)), make(map[string]struct{}, len(config.RegistrationProducts))
 	for id, product := range config.Products {
@@ -104,7 +110,7 @@ func New(deps Dependencies, config Config) (*Broker, error) {
 	}
 	return &Broker{repository: deps.Repository, installations: deps.Installations, identity: deps.Identity, envelope: deps.Envelope,
 		signer: deps.Signer, pairwise: deps.Pairwise, products: products, allowed: allowed, policy: config.RegistrationPolicyVersion,
-		otpKeyID: config.OTPKeyID, otpKey: append([]byte(nil), config.OTPKey...), dailyLimit: config.DailyLimit, now: time.Now}, nil
+		otpKeyID: config.OTPKeyID, otpKey: append([]byte(nil), config.OTPKey...), dailyLimit: config.DailyLimit, logger: config.Logger, now: time.Now}, nil
 }
 
 // Begin returns the same generic shape for new and existing email identities.
