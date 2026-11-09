@@ -27,6 +27,7 @@ type fakePublicAccounts struct {
 	challenge              accountbroker.ChallengeResponse
 	registration           accountbroker.Registration
 	profile                accountbroker.Profile
+	deletion               accountbroker.DeletionStatus
 }
 
 var _ PublicAccountBroker = (*accountbroker.Broker)(nil)
@@ -56,6 +57,16 @@ func (f *fakePublicAccounts) UpdateProfile(_ context.Context, credential string,
 	return f.profile, f.err
 }
 
+func (f *fakePublicAccounts) CreateDeletion(_ context.Context, credential string, input accountbroker.DeletionInput) (accountbroker.DeletionStatus, error) {
+	f.method, f.credential, f.input = "deletion", credential, input
+	return f.deletion, f.err
+}
+
+func (f *fakePublicAccounts) DeletionStatus(_ context.Context, credential string, input accountbroker.DeletionStatusInput) (accountbroker.DeletionStatus, error) {
+	f.method, f.credential, f.input = "deletion-status", credential, input
+	return f.deletion, f.err
+}
+
 func accountHandler(module PublicAccountBroker, logs *bytes.Buffer) http.Handler {
 	return New(nil, nil, nil, nil, nil, nil, nil, module, nil, map[string]struct{}{"https://linka.su": {}}, false, time.Minute, slog.New(slog.NewJSONHandler(logs, nil)))
 }
@@ -79,6 +90,7 @@ func TestPublicAccountRoutesForwardTypedInputsAndReturnOnlyContract(t *testing.T
 		RefreshToken: "refresh-secret", RefreshExpiresAt: now, RegistrationReceipt: "offline-receipt",
 	}
 	challenge := accountbroker.ChallengeResponse{ContractVersion: 1, ChallengeID: "challenge-id", Status: "pending", ExpiresAt: now, ResendAfter: now}
+	deletion := accountbroker.DeletionStatus{ContractVersion: 1, Product: "plays", RequestID: "request-id", Status: "requested", RequestedAt: now}
 	for _, tc := range []struct {
 		name, method, path, body string
 		input                    any
@@ -90,9 +102,11 @@ func TestPublicAccountRoutesForwardTypedInputsAndReturnOnlyContract(t *testing.T
 		{"refresh", "POST", "/v1/public/account-sessions/refresh", `{}`, nil, 200, registration},
 		{"revoke", "POST", "/v1/public/account-sessions/revoke", `{}`, nil, 200, map[string]bool{"revoked": true}},
 		{"profile", "PUT", "/v1/public/account-profile", `{"version":2,"holder_role":"self","country":"RU","region":"MOW"}`, accountbroker.ProfileInput{Version: 2, HolderRole: "self", Country: "RU", Region: "MOW"}, 200, profile},
+		{"deletion", "POST", "/v1/public/account-deletions", `{"request_id":"request-id","status_secret":"private-secret"}`, accountbroker.DeletionInput{RequestID: "request-id", StatusSecret: "private-secret"}, 202, deletion},
+		{"deletion-status", "POST", "/v1/public/account-deletions/status", `{"request_id":"request-id","product_id":"plays"}`, accountbroker.DeletionStatusInput{RequestID: "request-id", ProductID: "plays"}, 200, deletion},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := &fakePublicAccounts{challenge: challenge, registration: registration, profile: profile}
+			f := &fakePublicAccounts{challenge: challenge, registration: registration, profile: profile, deletion: deletion}
 			var logs bytes.Buffer
 			w := accountRequest(accountHandler(f, &logs), tc.method, tc.path, tc.body, "Bearer private-credential")
 			expected, err := json.Marshal(tc.result)
@@ -114,7 +128,7 @@ func TestPublicAccountRoutesForwardTypedInputsAndReturnOnlyContract(t *testing.T
 			if (tc.name == "verify" || tc.name == "refresh") && !strings.Contains(w.Body.String(), `"metrics_token":null`) {
 				t.Fatal("missing nullable metrics_token")
 			}
-			for _, secret := range []string{"private@example.test", "private-credential", "private-nonce", "123456", "refresh-secret", "offline-receipt"} {
+			for _, secret := range []string{"private@example.test", "private-credential", "private-nonce", "123456", "refresh-secret", "offline-receipt", "private-secret"} {
 				if strings.Contains(logs.String(), secret) {
 					t.Fatalf("logs contain secret %q", secret)
 				}
@@ -134,6 +148,8 @@ var publicAccountRoutes = []struct{ method, path string }{
 	{"POST", "/v1/public/account-sessions/refresh"},
 	{"POST", "/v1/public/account-sessions/revoke"},
 	{"PUT", "/v1/public/account-profile"},
+	{"POST", "/v1/public/account-deletions"},
+	{"POST", "/v1/public/account-deletions/status"},
 }
 
 func TestPublicAccountRejectsInvalidProtocolBeforeBroker(t *testing.T) {
@@ -204,6 +220,9 @@ func TestPublicAccountErrorsAreUniformAndSanitized(t *testing.T) {
 				status, code := tc.status, tc.code
 				if tc.name == "not found" && strings.HasSuffix(route.path, "/verify") {
 					status, code = 400, "challenge_rejected"
+				}
+				if tc.name == "not found" && route.path == "/v1/public/account-deletions/status" {
+					status, code = 404, "not_found"
 				}
 				if w.Code != status || w.Body.String() != `{"error":"`+code+`"}`+"\n" || w.Header().Get("Cache-Control") != "no-store" {
 					t.Fatalf("response = %d %s", w.Code, w.Body)

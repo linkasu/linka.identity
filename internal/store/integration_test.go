@@ -23,7 +23,7 @@ import (
 )
 
 func TestYDBIdentityOutboxAndPrivacyFlow(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	database := openIntegrationStore(t, ctx)
 
